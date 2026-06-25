@@ -4,3 +4,5 @@ pulp
 plotly
 openpyxl
 graphviz
+pymoo
+numpy
