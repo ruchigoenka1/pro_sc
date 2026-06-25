@@ -175,7 +175,6 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
             
         
-        
         ## --------------------------------------------------------
         ## 4. GANTT CHARTS
         ## --------------------------------------------------------
@@ -185,11 +184,11 @@ if st.button("🚀 Optimize Schedule", type="primary"):
         
         with col1:
             st.markdown("### 🔹 Chart 1: Job View (Grouped by Job)")
-            # Create Gantt categorized by Job, displaying which resource is handling it
+            # Fixed arguments: x_start and x_end
             fig_job = px.timeline(
                 df_res, 
-                start="Start", 
-                end="Finish", 
+                x_start="Start", 
+                x_end="Finish", 
                 y="Job", 
                 color="Resource",
                 text="Process",
@@ -197,16 +196,15 @@ if st.button("🚀 Optimize Schedule", type="primary"):
                 title="Timeline Grouped by Jobs"
             )
             fig_job.update_yaxes(autorange="reversed")
-            fig_job.update_layout(use_container_width=True)
             st.plotly_chart(fig_job, use_container_width=True)
             
         with col2:
             st.markdown("### 🔸 Chart 2: Resource View (Grouped by Resource)")
-            # Create Gantt categorized by Resource, displaying which job is running on it
+            # Fixed arguments: x_start and x_end
             fig_res = px.timeline(
                 df_res, 
-                start="Start", 
-                end="Finish", 
+                x_start="Start", 
+                x_end="Finish", 
                 y="Resource", 
                 color="Job",
                 text="Process",
@@ -214,7 +212,6 @@ if st.button("🚀 Optimize Schedule", type="primary"):
                 title="Timeline Grouped by Resources"
             )
             fig_res.update_yaxes(autorange="reversed")
-            fig_res.update_layout(use_container_width=True)
             st.plotly_chart(fig_res, use_container_width=True)
             
     else:
