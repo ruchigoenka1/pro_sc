@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import pulp
-import plotly.figure_factory as ff
 import plotly.express as px
 from datetime import datetime, timedelta
 
@@ -16,28 +15,55 @@ Optimize your project schedules using Mixed-Integer Linear Programming (**PuLP**
 Input your jobs, process flows, resource capabilities, and deadlines to generate optimal schedules and interactive Gantt charts.
 """)
 
+st.markdown("---")
 
 ## --------------------------------------------------------
-## 2. SAMPLE DATA & INPUTS
+## 2. SAMPLE DATA & FILE UPLOAD
 ## --------------------------------------------------------
-# Default sample data for easy testing
+# Expanded default sample data (Now with Job_3 and Job_4)
 default_data = pd.DataFrame([
     {"Job": "Job_1", "Process": "P1", "Eligible_Resources": "R1, R2", "Duration": 2, "Preceding_Process": ""},
     {"Job": "Job_1", "Process": "P2", "Eligible_Resources": "R2, R3", "Duration": 3, "Preceding_Process": "P1"},
     {"Job": "Job_2", "Process": "P1", "Eligible_Resources": "R1",    "Duration": 4, "Preceding_Process": ""},
     {"Job": "Job_2", "Process": "P2", "Eligible_Resources": "R2, R3", "Duration": 2, "Preceding_Process": "P1"},
+    {"Job": "Job_3", "Process": "P1", "Eligible_Resources": "R3",    "Duration": 2, "Preceding_Process": ""},
+    {"Job": "Job_3", "Process": "P2", "Eligible_Resources": "R1, R2", "Duration": 3, "Preceding_Process": "P1"},
+    {"Job": "Job_4", "Process": "P1", "Eligible_Resources": "R2",    "Duration": 3, "Preceding_Process": ""},
 ])
 
 st.sidebar.header("⏱️ Project Timeline Settings")
 start_date = st.sidebar.date_input("Project Start Date", datetime.today())
-deadline_days = st.sidebar.number_input("Project Deadline (Days from start)", min_value=1, value=15)
+# Increased default deadline since we added more jobs
+deadline_days = st.sidebar.number_input("Project Deadline (Days from start)", min_value=1, value=25)
 
 st.subheader("📋 Step 1: Define Job & Process Data")
-st.markdown("*Modify the table below or paste your data. Use commas to separate multiple eligible resources.*")
 
-# Editable dataframe
+# File Uploader supporting both CSV and Excel
+uploaded_file = st.file_uploader("Upload your scheduling data (.csv or .xlsx)", type=["csv", "xlsx"])
+
+if uploaded_file is not None:
+    try:
+        # Check file extension to use the correct pandas reader
+        if uploaded_file.name.endswith('.csv'):
+            initial_data = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith('.xlsx'):
+            initial_data = pd.read_excel(uploaded_file)
+            
+        # Clean up empty values
+        initial_data = initial_data.fillna("")
+        st.success(f"Successfully loaded data from {uploaded_file.name}")
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        initial_data = default_data
+else:
+    st.info("Showing default demo data. Upload a file above to use your own data!")
+    initial_data = default_data
+
+st.markdown("*Modify the table below or paste your data directly into it.*")
+
+# Editable Dataframe
 df_input = st.data_editor(
-    default_data, 
+    initial_data, 
     num_rows="dynamic", 
     use_container_width=True,
     column_config={
@@ -47,6 +73,7 @@ df_input = st.data_editor(
     }
 )
 
+st.markdown("---")
 
 ## --------------------------------------------------------
 ## 3. OPTIMIZATION ENGINE (PuLP)
@@ -58,7 +85,7 @@ if st.button("🚀 Optimize Schedule", type="primary"):
     all_resources = set()
     
     for idx, row in df_input.iterrows():
-        if pd.isna(row['Job']) or pd.isna(row['Process']):
+        if pd.isna(row['Job']) or row['Job'] == "" or pd.isna(row['Process']) or row['Process'] == "":
             continue
         
         resources = [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()]
@@ -71,23 +98,18 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             'process': row['Process'],
             'resources': resources,
             'duration': int(row['Duration']),
-            'preceding': row['Preceding_Process'].strip() if pd.notna(row['Preceding_Process']) else ""
+            'preceding': str(row['Preceding_Process']).strip() if pd.notna(row['Preceding_Process']) else ""
         })
         
     all_resources = list(all_resources)
     
-    # Initialize PuLP Problem (Minimize Makespan / Total End Time)
+    # Initialize PuLP Problem (Minimize Makespan)
     prob = pulp.LpProblem("Job_Scheduling", pulp.LpMinimize)
     
     # Decision Variables
-    # Start times for each task
     start_vars = {t['id']: pulp.LpVariable(f"start_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
-    # End times for each task
     end_vars = {t['id']: pulp.LpVariable(f"end_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
-    # Binary variable: 1 if task t uses resource r
     assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in tasks for r in t['resources']}
-    
-    # Overall project completion time (Makespan)
     makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Integer')
     
     # Objective Function
@@ -99,33 +121,26 @@ if st.button("🚀 Optimize Schedule", type="primary"):
         prob += end_vars[t['id']] == start_vars[t['id']] + t['duration']
         prob += makespan >= end_vars[t['id']]
         
-    # 2. Resource Assignment: Each task must be assigned to exactly ONE of its eligible resources
+    # 2. Resource Assignment
     for t in tasks:
         prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
         
-    # 3. Precedence Constraints (Within the same Job)
+    # 3. Precedence Constraints
     for t in tasks:
         if t['preceding']:
-            # Find the preceding task id
             pred_id = f"{t['job']}_{t['preceding']}"
             if pred_id in start_vars:
                 prob += start_vars[t['id']] >= end_vars[pred_id]
 
-    # 4. Resource Overlap Constraints (No two tasks can overlap on the same resource)
-    # Big-M notation to handle conditional logic
+    # 4. Resource Overlap Constraints (Big-M notation)
     M = 10000 
     for i in range(len(tasks)):
         for j in range(i + 1, len(tasks)):
             t1 = tasks[i]
             t2 = tasks[j]
-            
-            # Find common resources they both can use
             common_res = set(t1['resources']).intersection(set(t2['resources']))
             for r in common_res:
-                # Binary variable: 1 if t1 runs before t2
                 y = pulp.LpVariable(f"overlap_{t1['id']}_{t2['id']}_{r}", cat='Binary')
-                
-                # If both tasks are assigned to resource r, they must not overlap
                 prob += start_vars[t1['id']] >= end_vars[t2['id']] - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
                 prob += start_vars[t2['id']] >= end_vars[t1['id']] - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
 
@@ -143,7 +158,6 @@ if st.button("🚀 Optimize Schedule", type="primary"):
         # Build Results DataFrame
         results = []
         for t in tasks:
-            # Find which resource was selected
             selected_resource = None
             for r in t['resources']:
                 if assign_vars[(t['id'], r)].varValue == 1:
@@ -152,8 +166,6 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             
             s_val = int(start_vars[t['id']].varValue)
             e_val = int(end_vars[t['id']].varValue)
-            
-            # Convert offset integers to real calendar dates
             start_date_actual = pd.to_datetime(start_date) + timedelta(days=s_val)
             end_date_actual = pd.to_datetime(start_date) + timedelta(days=e_val)
             
@@ -169,13 +181,15 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             })
             
         df_res = pd.DataFrame(results)
+        df_res = df_res.sort_values(by=["Start_Day", "Job"])
         
-        # Display Data Table
+        # Display Data Table (Fixed 'expander' spelling)
         with st.expander("🔍 View Schedule Data Table"):
             st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
             
+        st.markdown("---")
         
-## --------------------------------------------------------
+        ## --------------------------------------------------------
         ## 4. GANTT CHARTS (FULL WIDTH)
         ## --------------------------------------------------------
         st.subheader("📊 Step 2: Interactive Gantt Charts")
@@ -191,14 +205,14 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             text="Process",
             hover_data=["Resource", "Start_Day", "End_Day"],
             title="Timeline Grouped by Jobs",
-            height=400 # Added height control for readability
+            height=450
         )
         fig_job.update_yaxes(autorange="reversed")
-        # Ensure text labels inside the bars are visible and clean
-        fig_job.update_traces(textposition='inside', insidetextanchor='center')
+        # Fixed Plotly parameter names
+        fig_job.update_traces(textposition='inside', insidetextanchor='middle')
         st.plotly_chart(fig_job, use_container_width=True)
         
-        st.markdown("---") # Visual separator between charts
+        st.markdown("---")
         
         # --- Chart 2: Resource View ---
         st.markdown("### 🔸 Chart 2: Resource View (Grouped by Resource)")
@@ -211,11 +225,12 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             text="Process",
             hover_data=["Job", "Start_Day", "End_Day"],
             title="Timeline Grouped by Resources",
-            height=400 # Added height control for readability
+            height=450
         )
         fig_res.update_yaxes(autorange="reversed")
-        fig_res.update_traces(textposition='inside', insidetextanchor='center')
+        # Fixed Plotly parameter names
+        fig_res.update_traces(textposition='inside', insidetextanchor='middle')
         st.plotly_chart(fig_res, use_container_width=True)
-        
+            
     else:
         st.error("❌ No feasible schedule found within the specified deadline. Try increasing the project deadline in the sidebar.")
