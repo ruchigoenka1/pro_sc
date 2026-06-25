@@ -17,11 +17,11 @@ st.sidebar.header("⏱️ Optimization Settings")
 start_date = st.sidebar.date_input("Project Start Date", datetime.today())
 deadline_days = st.sidebar.number_input("Project Deadline (Days)", min_value=1, value=25)
 
-# NEW: Optimizer time limit
 st.sidebar.markdown("---")
-time_limit = st.sidebar.slider(
+# CHANGED: Slider replaced with Number Input
+time_limit = st.sidebar.number_input(
     "Optimizer Time Limit (Seconds)", 
-    min_value=10, max_value=300, value=60, step=10,
+    min_value=1, max_value=600, value=60, step=10,
     help="Limits how long the solver searches for an optimal solution. Crucial when adding changeover matrices."
 )
 
@@ -62,58 +62,74 @@ df_input = st.data_editor(initial_data, num_rows="dynamic", use_container_width=
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 3. VISUAL MAP GENERATION (Graphviz)
+## 3. VISUAL MAP GENERATION (Graphviz - UPDATED)
 ## --------------------------------------------------------
 st.subheader("🗺️ Step 2: Verify Process Flow")
-st.markdown("This map is generated dynamically from your data to ensure dependencies are correct.")
+st.markdown("This map is generated dynamically. Check each product's tab to ensure dependencies are correct.")
 
-def generate_flowchart(df):
-    dot = graphviz.Digraph(comment='Process Flow')
-    dot.attr(rankdir='LR') # Left to Right layout
+def generate_single_job_flowchart(df, job_name):
+    """Generates a flowchart for a single job with resources stacked below processes."""
+    dot = graphviz.Digraph(comment=f'Process Flow {job_name}')
     
-    # Filter out empty rows
-    valid_df = df[(df['Job'] != '') & (df['Process'] != '')].copy()
-    jobs = valid_df['Job'].unique()
+    # CHANGED: Black background and Left-to-Right ranking
+    dot.attr(bgcolor='black', rankdir='LR')
     
-    for job in jobs:
-        # Add Job Node (Blue Square)
-        dot.node(job, job, shape='box', style='filled', fillcolor='#4A71B5', fontcolor='white')
+    job_data = df[df['Job'] == job_name]
+    
+    # Add Main Job Node (Blue Square)
+    dot.node(job_name, job_name, shape='box', style='filled', fillcolor='#4A71B5', fontcolor='white', color='white')
+    
+    for idx, row in job_data.iterrows():
+        process = str(row['Process']).strip()
+        proc_id = f"{job_name}_{process}"
         
-        job_data = valid_df[valid_df['Job'] == job]
-        for idx, row in job_data.iterrows():
-            process = str(row['Process']).strip()
-            proc_id = f"{job}_{process}"
+        # CHANGED: Use a subgraph to enforce vertical alignment (resources below process)
+        with dot.subgraph() as s:
+            s.attr(rank='same') # In LR layout, 'same' rank stacks elements vertically
             
-            # Add Process Node (Beige Square)
-            dot.node(proc_id, process, shape='box', style='rounded,filled', fillcolor='#F2D5BA')
+            # Process Node (Beige)
+            s.node(proc_id, process, shape='box', style='rounded,filled', fillcolor='#F2D5BA', fontcolor='black', color='white')
             
-            # Add Resource Dependencies (Triangles)
+            # Resource Dependencies (Triangles)
             resources = [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()]
-            for res in resources:
-                res_id = f"{proc_id}_{res}"
-                dot.node(res_id, res, shape='triangle', style='filled', fillcolor='#CBE0BE')
-                dot.edge(proc_id, res_id, arrowhead='none', style='dotted')
+            for r_idx, res in enumerate(resources):
+                # Ensure unique IDs for resources to prevent overlapping lines
+                res_id = f"{proc_id}_{res}_{r_idx}" 
+                s.node(res_id, res, shape='triangle', style='filled', fillcolor='#CBE0BE', fontcolor='black', color='white')
+                # Dotted white line connecting them
+                s.edge(proc_id, res_id, arrowhead='none', style='dotted', color='white')
+        
+        # Add Precedence Edges (Solid Orange lines)
+        preceding_str = str(row['Preceding_Process']).strip()
+        if preceding_str:
+            preceding_list = [p.strip() for p in preceding_str.split(',') if p.strip()]
+            for pred in preceding_list:
+                pred_id = f"{job_name}_{pred}"
+                dot.edge(pred_id, proc_id, color='#E28743', penwidth='2')
+        else:
+            # If no predecessor, connect directly to the main Job node
+            dot.edge(job_name, proc_id, color='#E28743', penwidth='2')
             
-            # Add Precedence Edges
-            preceding_str = str(row['Preceding_Process']).strip()
-            if preceding_str:
-                # Handle multiple preceding processes (e.g. "C, D")
-                preceding_list = [p.strip() for p in preceding_str.split(',') if p.strip()]
-                for pred in preceding_list:
-                    pred_id = f"{job}_{pred}"
-                    dot.edge(pred_id, proc_id, color='#E28743')
-            else:
-                # If no preceding process, it connects directly to the Job
-                dot.edge(job, proc_id, color='#E28743')
-                
     return dot
 
 with st.expander("👁️ View Process Flow Map", expanded=True):
-    try:
-        flow_graph = generate_flowchart(df_input)
-        st.graphviz_chart(flow_graph, use_container_width=True)
-    except Exception as e:
-        st.warning("Ensure your table data is valid to render the map.")
+    valid_df_map = df_input[(df_input['Job'] != '') & (df_input['Process'] != '')]
+    
+    if not valid_df_map.empty:
+        unique_jobs = sorted(list(valid_df_map['Job'].unique()))
+        
+        # CHANGED: Create dynamic tabs for each product
+        tabs = st.tabs(unique_jobs)
+        
+        for idx, job_name in enumerate(unique_jobs):
+            with tabs[idx]:
+                try:
+                    flow_graph = generate_single_job_flowchart(valid_df_map, job_name)
+                    st.graphviz_chart(flow_graph, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Could not render map for {job_name}: Ensure your table data is valid. ({e})")
+    else:
+        st.info("Add valid job data to generate the map.")
 
 st.markdown("---")
 
@@ -124,10 +140,9 @@ st.subheader("🔄 Step 3: Changeover Matrix (Sequence-Dependent Setup)")
 st.markdown("Define the time penalty (in days) when a resource switches from one Job to another.")
 
 valid_df = df_input[(df_input['Job'] != '') & (df_input['Process'] != '')]
-unique_jobs = sorted(list(valid_df['Job'].unique()))
+unique_jobs_list = sorted(list(valid_df['Job'].unique()))
 
-# Create an N x N matrix filled with 0s by default
-default_changeover = pd.DataFrame(0, index=unique_jobs, columns=unique_jobs)
+default_changeover = pd.DataFrame(0, index=unique_jobs_list, columns=unique_jobs_list)
 df_changeover = st.data_editor(default_changeover, use_container_width=True)
 
 st.markdown("---")
@@ -161,23 +176,19 @@ if st.button("🚀 Optimize Schedule", type="primary"):
     
     prob += makespan
     
-    # 1. End time & Makespan
     for t in tasks:
         prob += end_vars[t['id']] == start_vars[t['id']] + t['duration']
         prob += makespan >= end_vars[t['id']]
         
-    # 2. Resource Assignment
     for t in tasks:
         prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
         
-    # 3. Precedence Constraints (Supports multiple predecessors)
     for t in tasks:
         for pred in t['preceding']:
             pred_id = f"{t['job']}_{pred}"
             if pred_id in start_vars:
                 prob += start_vars[t['id']] >= end_vars[pred_id]
 
-    # 4. Resource Overlap & Changeover Time Constraints
     M = 10000 
     for i in range(len(tasks)):
         for j in range(i + 1, len(tasks)):
@@ -188,30 +199,25 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             for r in common_res:
                 y = pulp.LpVariable(f"overlap_{t1['id']}_{t2['id']}_{r}", cat='Binary')
                 
-                # Fetch sequence-dependent changeover penalties from the matrix
                 c_time_1_to_2 = int(df_changeover.loc[t1['job'], t2['job']]) if t1['job'] != t2['job'] else 0
                 c_time_2_to_1 = int(df_changeover.loc[t2['job'], t1['job']]) if t1['job'] != t2['job'] else 0
                 
-                # If t1 and t2 share a resource, they cannot overlap. Plus, add changeover time!
                 prob += start_vars[t2['id']] >= end_vars[t1['id']] + c_time_1_to_2 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
                 prob += start_vars[t1['id']] >= end_vars[t2['id']] + c_time_2_to_1 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
 
     prob += makespan <= deadline_days
 
-    # Solve with user-defined Time Limit
     solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
     with st.spinner(f"Optimizing... (Max time limit: {time_limit} seconds)"):
         status = prob.solve(solver)
     
-    if pulp.LpStatus[status] in ["Optimal", "Not Solved"]: # Not solved might mean feasible but hit time limit
-        # Check if we actually have a feasible solution even if it hit the time limit
+    if pulp.LpStatus[status] in ["Optimal", "Not Solved"]:
         if start_vars[tasks[0]['id']].varValue is not None:
             st.success(f"✨ Schedule Found! Total project duration: **{int(makespan.varValue)} days**.")
             
             results = []
             for t in tasks:
                 selected_resource = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue == 1][0]
-                
                 s_val = int(start_vars[t['id']].varValue)
                 e_val = int(end_vars[t['id']].varValue)
                 
