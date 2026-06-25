@@ -174,7 +174,7 @@ if st.button("🚀 Optimize Schedule", type="primary"):
         with st.expanders("🔍 View Schedule Data Table"):
             st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
             
-        ---
+        
         
         ## --------------------------------------------------------
         ## 4. GANTT CHARTS
