@@ -16,7 +16,6 @@ Optimize your project schedules using Mixed-Integer Linear Programming (**PuLP**
 Input your jobs, process flows, resource capabilities, and deadlines to generate optimal schedules and interactive Gantt charts.
 """)
 
----
 
 ## --------------------------------------------------------
 ## 2. SAMPLE DATA & INPUTS
