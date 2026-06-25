@@ -2,95 +2,146 @@ import streamlit as st
 import pandas as pd
 import pulp
 import plotly.express as px
+import graphviz
 from datetime import datetime, timedelta
 
 st.set_page_config(layout="wide", page_title="Advanced Job Scheduler")
 
 ## --------------------------------------------------------
-## 1. TITLE & INTRODUCTION
+## 1. TITLE & SETTINGS
 ## --------------------------------------------------------
 st.title("🗓️ Smart Job & Resource Scheduler")
-st.markdown("""
-Optimize your project schedules using Mixed-Integer Linear Programming (**PuLP**). 
-Input your jobs, process flows, resource capabilities, and deadlines to generate optimal schedules and interactive Gantt charts.
-""")
+st.markdown("Optimize schedules using PuLP. Features include precedence constraints, visual flow validation, and sequence-dependent changeovers.")
 
-st.markdown("---")
-
-## --------------------------------------------------------
-## 2. SAMPLE DATA & FILE UPLOAD
-## --------------------------------------------------------
-# Expanded default sample data (Now with Job_3 and Job_4)
-default_data = pd.DataFrame([
-    {"Job": "Job_1", "Process": "P1", "Eligible_Resources": "R1, R2", "Duration": 2, "Preceding_Process": ""},
-    {"Job": "Job_1", "Process": "P2", "Eligible_Resources": "R2, R3", "Duration": 3, "Preceding_Process": "P1"},
-    {"Job": "Job_2", "Process": "P1", "Eligible_Resources": "R1",    "Duration": 4, "Preceding_Process": ""},
-    {"Job": "Job_2", "Process": "P2", "Eligible_Resources": "R2, R3", "Duration": 2, "Preceding_Process": "P1"},
-    {"Job": "Job_3", "Process": "P1", "Eligible_Resources": "R3",    "Duration": 2, "Preceding_Process": ""},
-    {"Job": "Job_3", "Process": "P2", "Eligible_Resources": "R1, R2", "Duration": 3, "Preceding_Process": "P1"},
-    {"Job": "Job_4", "Process": "P1", "Eligible_Resources": "R2",    "Duration": 3, "Preceding_Process": ""},
-])
-
-st.sidebar.header("⏱️ Project Timeline Settings")
+st.sidebar.header("⏱️ Optimization Settings")
 start_date = st.sidebar.date_input("Project Start Date", datetime.today())
-# Increased default deadline since we added more jobs
-deadline_days = st.sidebar.number_input("Project Deadline (Days from start)", min_value=1, value=25)
+deadline_days = st.sidebar.number_input("Project Deadline (Days)", min_value=1, value=25)
 
-st.subheader("📋 Step 1: Define Job & Process Data")
-
-# File Uploader supporting both CSV and Excel
-uploaded_file = st.file_uploader("Upload your scheduling data (.csv or .xlsx)", type=["csv", "xlsx"])
-
-if uploaded_file is not None:
-    try:
-        # Check file extension to use the correct pandas reader
-        if uploaded_file.name.endswith('.csv'):
-            initial_data = pd.read_csv(uploaded_file)
-        elif uploaded_file.name.endswith('.xlsx'):
-            initial_data = pd.read_excel(uploaded_file)
-            
-        # Clean up empty values
-        initial_data = initial_data.fillna("")
-        st.success(f"Successfully loaded data from {uploaded_file.name}")
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        initial_data = default_data
-else:
-    st.info("Showing default demo data. Upload a file above to use your own data!")
-    initial_data = default_data
-
-st.markdown("*Modify the table below or paste your data directly into it.*")
-
-# Editable Dataframe
-df_input = st.data_editor(
-    initial_data, 
-    num_rows="dynamic", 
-    use_container_width=True,
-    column_config={
-        "Eligible_Resources": st.column_config.TextColumn(help="Comma-separated resources, e.g., R1, R2"),
-        "Duration": st.column_config.NumberColumn(help="Duration in days/hours"),
-        "Preceding_Process": st.column_config.TextColumn(help="Process name that must finish before this one starts")
-    }
+# NEW: Optimizer time limit
+st.sidebar.markdown("---")
+time_limit = st.sidebar.slider(
+    "Optimizer Time Limit (Seconds)", 
+    min_value=10, max_value=300, value=60, step=10,
+    help="Limits how long the solver searches for an optimal solution. Crucial when adding changeover matrices."
 )
 
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 3. OPTIMIZATION ENGINE (PuLP)
+## 2. DATA ENTRY
+## --------------------------------------------------------
+st.subheader("📋 Step 1: Define Job & Process Data")
+
+default_data = pd.DataFrame([
+    {"Job": "P1", "Process": "A", "Eligible_Resources": "R1", "Duration": 2, "Preceding_Process": ""},
+    {"Job": "P1", "Process": "B", "Eligible_Resources": "R2", "Duration": 3, "Preceding_Process": "A"},
+    {"Job": "P1", "Process": "C", "Eligible_Resources": "R2", "Duration": 2, "Preceding_Process": "B"},
+    {"Job": "P1", "Process": "D", "Eligible_Resources": "R1", "Duration": 4, "Preceding_Process": "B"},
+    {"Job": "P1", "Process": "E", "Eligible_Resources": "R1", "Duration": 2, "Preceding_Process": "C, D"},
+    {"Job": "P2", "Process": "A", "Eligible_Resources": "R2", "Duration": 3, "Preceding_Process": ""},
+    {"Job": "P2", "Process": "B", "Eligible_Resources": "R1", "Duration": 2, "Preceding_Process": "A"},
+])
+
+uploaded_file = st.file_uploader("Upload your scheduling data (.csv or .xlsx)", type=["csv", "xlsx"])
+
+if uploaded_file is not None:
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            initial_data = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith('.xlsx'):
+            initial_data = pd.read_excel(uploaded_file)
+        initial_data = initial_data.fillna("")
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        initial_data = default_data
+else:
+    initial_data = default_data
+
+df_input = st.data_editor(initial_data, num_rows="dynamic", use_container_width=True)
+
+st.markdown("---")
+
+## --------------------------------------------------------
+## 3. VISUAL MAP GENERATION (Graphviz)
+## --------------------------------------------------------
+st.subheader("🗺️ Step 2: Verify Process Flow")
+st.markdown("This map is generated dynamically from your data to ensure dependencies are correct.")
+
+def generate_flowchart(df):
+    dot = graphviz.Digraph(comment='Process Flow')
+    dot.attr(rankdir='LR') # Left to Right layout
+    
+    # Filter out empty rows
+    valid_df = df[(df['Job'] != '') & (df['Process'] != '')].copy()
+    jobs = valid_df['Job'].unique()
+    
+    for job in jobs:
+        # Add Job Node (Blue Square)
+        dot.node(job, job, shape='box', style='filled', fillcolor='#4A71B5', fontcolor='white')
+        
+        job_data = valid_df[valid_df['Job'] == job]
+        for idx, row in job_data.iterrows():
+            process = str(row['Process']).strip()
+            proc_id = f"{job}_{process}"
+            
+            # Add Process Node (Beige Square)
+            dot.node(proc_id, process, shape='box', style='rounded,filled', fillcolor='#F2D5BA')
+            
+            # Add Resource Dependencies (Triangles)
+            resources = [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()]
+            for res in resources:
+                res_id = f"{proc_id}_{res}"
+                dot.node(res_id, res, shape='triangle', style='filled', fillcolor='#CBE0BE')
+                dot.edge(proc_id, res_id, arrowhead='none', style='dotted')
+            
+            # Add Precedence Edges
+            preceding_str = str(row['Preceding_Process']).strip()
+            if preceding_str:
+                # Handle multiple preceding processes (e.g. "C, D")
+                preceding_list = [p.strip() for p in preceding_str.split(',') if p.strip()]
+                for pred in preceding_list:
+                    pred_id = f"{job}_{pred}"
+                    dot.edge(pred_id, proc_id, color='#E28743')
+            else:
+                # If no preceding process, it connects directly to the Job
+                dot.edge(job, proc_id, color='#E28743')
+                
+    return dot
+
+with st.expander("👁️ View Process Flow Map", expanded=True):
+    try:
+        flow_graph = generate_flowchart(df_input)
+        st.graphviz_chart(flow_graph, use_container_width=True)
+    except Exception as e:
+        st.warning("Ensure your table data is valid to render the map.")
+
+st.markdown("---")
+
+## --------------------------------------------------------
+## 4. CHANGEOVER MATRIX
+## --------------------------------------------------------
+st.subheader("🔄 Step 3: Changeover Matrix (Sequence-Dependent Setup)")
+st.markdown("Define the time penalty (in days) when a resource switches from one Job to another.")
+
+valid_df = df_input[(df_input['Job'] != '') & (df_input['Process'] != '')]
+unique_jobs = sorted(list(valid_df['Job'].unique()))
+
+# Create an N x N matrix filled with 0s by default
+default_changeover = pd.DataFrame(0, index=unique_jobs, columns=unique_jobs)
+df_changeover = st.data_editor(default_changeover, use_container_width=True)
+
+st.markdown("---")
+
+## --------------------------------------------------------
+## 5. OPTIMIZATION ENGINE (PuLP)
 ## --------------------------------------------------------
 if st.button("🚀 Optimize Schedule", type="primary"):
     
-    # Data Parsing
     tasks = []
-    all_resources = set()
     
-    for idx, row in df_input.iterrows():
-        if pd.isna(row['Job']) or row['Job'] == "" or pd.isna(row['Process']) or row['Process'] == "":
-            continue
-        
+    for idx, row in valid_df.iterrows():
         resources = [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()]
-        for r in resources:
-            all_resources.add(r)
+        preceding = [p.strip() for p in str(row['Preceding_Process']).split(',') if p.strip()]
             
         tasks.append({
             'id': f"{row['Job']}_{row['Process']}",
@@ -98,25 +149,19 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             'process': row['Process'],
             'resources': resources,
             'duration': int(row['Duration']),
-            'preceding': str(row['Preceding_Process']).strip() if pd.notna(row['Preceding_Process']) else ""
+            'preceding': preceding
         })
-        
-    all_resources = list(all_resources)
     
-    # Initialize PuLP Problem (Minimize Makespan)
     prob = pulp.LpProblem("Job_Scheduling", pulp.LpMinimize)
     
-    # Decision Variables
     start_vars = {t['id']: pulp.LpVariable(f"start_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
     end_vars = {t['id']: pulp.LpVariable(f"end_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
     assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in tasks for r in t['resources']}
     makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Integer')
     
-    # Objective Function
     prob += makespan
     
-    # Constraints
-    # 1. End time definition & Makespan boundary
+    # 1. End time & Makespan
     for t in tasks:
         prob += end_vars[t['id']] == start_vars[t['id']] + t['duration']
         prob += makespan >= end_vars[t['id']]
@@ -125,112 +170,80 @@ if st.button("🚀 Optimize Schedule", type="primary"):
     for t in tasks:
         prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
         
-    # 3. Precedence Constraints
+    # 3. Precedence Constraints (Supports multiple predecessors)
     for t in tasks:
-        if t['preceding']:
-            pred_id = f"{t['job']}_{t['preceding']}"
+        for pred in t['preceding']:
+            pred_id = f"{t['job']}_{pred}"
             if pred_id in start_vars:
                 prob += start_vars[t['id']] >= end_vars[pred_id]
 
-    # 4. Resource Overlap Constraints (Big-M notation)
+    # 4. Resource Overlap & Changeover Time Constraints
     M = 10000 
     for i in range(len(tasks)):
         for j in range(i + 1, len(tasks)):
             t1 = tasks[i]
             t2 = tasks[j]
             common_res = set(t1['resources']).intersection(set(t2['resources']))
+            
             for r in common_res:
                 y = pulp.LpVariable(f"overlap_{t1['id']}_{t2['id']}_{r}", cat='Binary')
-                prob += start_vars[t1['id']] >= end_vars[t2['id']] - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
-                prob += start_vars[t2['id']] >= end_vars[t1['id']] - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
+                
+                # Fetch sequence-dependent changeover penalties from the matrix
+                c_time_1_to_2 = int(df_changeover.loc[t1['job'], t2['job']]) if t1['job'] != t2['job'] else 0
+                c_time_2_to_1 = int(df_changeover.loc[t2['job'], t1['job']]) if t1['job'] != t2['job'] else 0
+                
+                # If t1 and t2 share a resource, they cannot overlap. Plus, add changeover time!
+                prob += start_vars[t2['id']] >= end_vars[t1['id']] + c_time_1_to_2 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
+                prob += start_vars[t1['id']] >= end_vars[t2['id']] + c_time_2_to_1 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
 
-    # 5. Deadline Constraint
     prob += makespan <= deadline_days
 
-    # Solve
-    solver = pulp.PULP_CBC_CMD(msg=False)
-    status = prob.solve(solver)
+    # Solve with user-defined Time Limit
+    solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
+    with st.spinner(f"Optimizing... (Max time limit: {time_limit} seconds)"):
+        status = prob.solve(solver)
     
-    # Check Result Status
-    if pulp.LpStatus[status] == "Optimal":
-        st.success(f"✨ Optimal Schedule Found! Total project duration: **{int(makespan.varValue)} days**.")
-        
-        # Build Results DataFrame
-        results = []
-        for t in tasks:
-            selected_resource = None
-            for r in t['resources']:
-                if assign_vars[(t['id'], r)].varValue == 1:
-                    selected_resource = r
-                    break
+    if pulp.LpStatus[status] in ["Optimal", "Not Solved"]: # Not solved might mean feasible but hit time limit
+        # Check if we actually have a feasible solution even if it hit the time limit
+        if start_vars[tasks[0]['id']].varValue is not None:
+            st.success(f"✨ Schedule Found! Total project duration: **{int(makespan.varValue)} days**.")
             
-            s_val = int(start_vars[t['id']].varValue)
-            e_val = int(end_vars[t['id']].varValue)
-            start_date_actual = pd.to_datetime(start_date) + timedelta(days=s_val)
-            end_date_actual = pd.to_datetime(start_date) + timedelta(days=e_val)
+            results = []
+            for t in tasks:
+                selected_resource = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue == 1][0]
+                
+                s_val = int(start_vars[t['id']].varValue)
+                e_val = int(end_vars[t['id']].varValue)
+                
+                results.append({
+                    "Job": t['job'],
+                    "Process": t['process'],
+                    "Resource": selected_resource,
+                    "Start_Day": s_val,
+                    "End_Day": e_val,
+                    "Start": pd.to_datetime(start_date) + timedelta(days=s_val),
+                    "Finish": pd.to_datetime(start_date) + timedelta(days=e_val)
+                })
+                
+            df_res = pd.DataFrame(results).sort_values(by=["Start_Day", "Job"])
             
-            results.append({
-                "Job": t['job'],
-                "Process": t['process'],
-                "Task": f"{t['job']} ({t['process']})",
-                "Resource": selected_resource,
-                "Start_Day": s_val,
-                "End_Day": e_val,
-                "Start": start_date_actual,
-                "Finish": end_date_actual
-            })
+            with st.expander("🔍 View Schedule Data Table"):
+                st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
             
-        df_res = pd.DataFrame(results)
-        df_res = df_res.sort_values(by=["Start_Day", "Job"])
-        
-        # Display Data Table (Fixed 'expander' spelling)
-        with st.expander("🔍 View Schedule Data Table"):
-            st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
+            st.subheader("📊 Step 4: Interactive Gantt Charts")
             
-        st.markdown("---")
-        
-        ## --------------------------------------------------------
-        ## 4. GANTT CHARTS (FULL WIDTH)
-        ## --------------------------------------------------------
-        st.subheader("📊 Step 2: Interactive Gantt Charts")
-        
-        # --- Chart 1: Job View ---
-        st.markdown("### 🔹 Chart 1: Job View (Grouped by Job)")
-        fig_job = px.timeline(
-            df_res, 
-            x_start="Start", 
-            x_end="Finish", 
-            y="Job", 
-            color="Resource",
-            text="Process",
-            hover_data=["Resource", "Start_Day", "End_Day"],
-            title="Timeline Grouped by Jobs",
-            height=450
-        )
-        fig_job.update_yaxes(autorange="reversed")
-        # Fixed Plotly parameter names
-        fig_job.update_traces(textposition='inside', insidetextanchor='middle')
-        st.plotly_chart(fig_job, use_container_width=True)
-        
-        st.markdown("---")
-        
-        # --- Chart 2: Resource View ---
-        st.markdown("### 🔸 Chart 2: Resource View (Grouped by Resource)")
-        fig_res = px.timeline(
-            df_res, 
-            x_start="Start", 
-            x_end="Finish", 
-            y="Resource", 
-            color="Job",
-            text="Process",
-            hover_data=["Job", "Start_Day", "End_Day"],
-            title="Timeline Grouped by Resources",
-            height=450
-        )
-        fig_res.update_yaxes(autorange="reversed")
-        # Fixed Plotly parameter names
-        fig_res.update_traces(textposition='inside', insidetextanchor='middle')
-        st.plotly_chart(fig_res, use_container_width=True)
+            fig_job = px.timeline(df_res, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", title="Timeline Grouped by Jobs", height=450)
+            fig_job.update_yaxes(autorange="reversed")
+            fig_job.update_traces(textposition='inside', insidetextanchor='middle')
+            st.plotly_chart(fig_job, use_container_width=True)
             
+            st.markdown("---")
+            
+            fig_res = px.timeline(df_res, x_start="Start", x_end="Finish", y="Resource", color="Job", text="Process", title="Timeline Grouped by Resources", height=450)
+            fig_res.update_yaxes(autorange="reversed")
+            fig_res.update_traces(textposition='inside', insidetextanchor='middle')
+            st.plotly_chart(fig_res, use_container_width=True)
+        else:
+            st.error("❌ No feasible schedule found. Try increasing the deadline or relaxing constraints.")
     else:
-        st.error("❌ No feasible schedule found within the specified deadline. Try increasing the project deadline in the sidebar.")
+        st.error("❌ Optimization failed. Try increasing the deadline or the optimizer time limit.")
