@@ -18,31 +18,33 @@ st.set_page_config(layout="wide", page_title="Advanced Job Scheduler")
 ## 1. TITLE & SETTINGS
 ## --------------------------------------------------------
 st.title("🗓️ Smart Job & Resource Scheduler")
-st.markdown("Optimize schedules using Exact MILP or Evolutionary Algorithms. Features include precedence constraints, visual flow validation, sequence-dependent changeovers, and project-specific deadlines.")
+st.markdown("Optimize your production schedules dynamically. Features include precedence constraints, visual flow validation, sequence-dependent changeovers, and project-specific deadlines.")
 
 st.sidebar.header("⚙️ Solver Settings")
 start_date = st.sidebar.date_input("Project Start Date", datetime.today())
 
+# Terminology updated for demo purposes
 solver_choice = st.sidebar.radio(
     "Select Solving Engine:", 
-    ("MILP Optimizer (Exact)", "Genetic Algorithm (Metaheuristic)")
+    ("Optimizer", "Evolutionary Algorithm")
 )
 
 st.sidebar.markdown("---")
-if solver_choice == "MILP Optimizer (Exact)":
+if solver_choice == "Optimizer":
     time_limit = st.sidebar.number_input(
         "Optimizer Time Limit (Seconds)", 
         min_value=10, max_value=1200, value=120, step=10,
         help="Limits how long the solver searches. Increase if you get timeout errors."
     )
 else:
+    # Labels updated for demo purposes
     ga_generations = st.sidebar.number_input(
-        "GA Generations", 
+        "No of Generation", 
         min_value=50, max_value=1000, value=100, step=50,
         help="How many evolutionary cycles to run. Higher = better results but slower."
     )
     ga_pop_size = st.sidebar.number_input(
-        "Population Size", 
+        "Size", 
         min_value=20, max_value=500, value=50, step=10,
         help="Number of schedules tested per generation."
     )
@@ -159,7 +161,7 @@ with st.expander("📝 Edit Process-Level Changeover Matrix", expanded=False):
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 6. OPTIMIZATION LOGIC
+## 6. OPTIMIZATION LOGIC & RESULTS
 ## --------------------------------------------------------
 
 # Shared result display function
@@ -168,10 +170,35 @@ def display_results(results_df, total_makespan, penalty_msg=""):
     if penalty_msg:
         st.warning(penalty_msg)
         
-    with st.expander("🔍 View Schedule Data Table"):
-        st.dataframe(results_df[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
+    # --- NEW: Job Completion & Deadline Status Table ---
+    st.subheader("📅 Step 5: Project Completion & Deadline Status")
     
-    st.subheader("📊 Step 5: Interactive Gantt Charts")
+    # Calculate exactly when each job finishes
+    job_summary = results_df.groupby("Job").agg(
+        Finished_Day=("End_Day", "max"),
+        Finish_Date=("Finish", "max")
+    ).reset_index()
+    
+    # Map the targeted deadlines
+    job_summary["Deadline (Days)"] = job_summary["Job"].apply(lambda x: int(deadline_dict.get(x, 999)))
+    
+    # Reorganize and rename for the UI
+    job_summary = job_summary[["Job", "Finish_Date", "Finished_Day", "Deadline (Days)"]]
+    job_summary.rename(columns={"Finished_Day": "Total Days Taken", "Finish_Date": "Completion Date"}, inplace=True)
+    
+    # Highlight function: Red background if it missed the deadline
+    def highlight_late_jobs(row):
+        if row["Total Days Taken"] > row["Deadline (Days)"]:
+            return ['background-color: rgba(255, 75, 75, 0.3); color: white; font-weight: bold;'] * len(row)
+        return [''] * len(row)
+        
+    st.dataframe(job_summary.style.apply(highlight_late_jobs, axis=1), use_container_width=True, hide_index=True)
+    
+    # --- Detailed Task View ---
+    with st.expander("🔍 View Detailed Task Schedule Table"):
+        st.dataframe(results_df[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True, hide_index=True)
+    
+    st.subheader("📊 Step 6: Interactive Gantt Charts")
     
     fig_job = px.timeline(results_df, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", title="Timeline Grouped by Jobs", height=450)
     fig_job.update_yaxes(autorange="reversed")
@@ -188,7 +215,7 @@ def display_results(results_df, total_makespan, penalty_msg=""):
 
 if st.button(f"🚀 Run {solver_choice}", type="primary"):
     
-    # 1. Parse Tasks universally
+    # Parse Tasks universally
     tasks = []
     for idx, row in valid_df.iterrows():
         tasks.append({
@@ -201,9 +228,9 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
         })
 
     # ==========================================
-    # ENGINE A: Exact MILP (PuLP)
+    # ENGINE A: Optimizer (PuLP)
     # ==========================================
-    if solver_choice == "MILP Optimizer (Exact)":
+    if solver_choice == "Optimizer":
         prob = pulp.LpProblem("Job_Scheduling", pulp.LpMinimize)
         
         start_vars = {t['id']: pulp.LpVariable(f"start_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
@@ -241,7 +268,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             prob += end_vars[t['id']] <= int(deadline_dict.get(t['job'], 999))
 
         solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
-        with st.spinner(f"Optimizing EXACT schedule... (Max {time_limit}s)"):
+        with st.spinner(f"Optimizing schedule... (Max {time_limit}s)"):
             status = prob.solve(solver)
         
         if pulp.LpStatus[status] in ["Optimal", "Not Solved"] and start_vars[tasks[0]['id']].varValue is not None:
@@ -269,18 +296,17 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                     prev_end = row['End_Day']
                     
             if not is_valid:
-                st.error("⚠️ **Solver Timeout:** Invalid partial schedule. Increase Time Limit.")
+                st.error("⚠️ **Timeout:** The optimizer could not find a strictly valid schedule in the allotted time. Please increase the Time Limit.")
             else:
                 display_results(df_res, int(makespan.varValue))
         else:
-            st.error("❌ No feasible schedule. Deadlines may be too tight.")
+            st.error("❌ No feasible schedule found. Deadlines may be too tight for the given workloads and changeovers.")
 
 
     # ==========================================
-    # ENGINE B: Genetic Algorithm (Metaheuristic)
+    # ENGINE B: Evolutionary Algorithm
     # ==========================================
     else:
-        # Decoder Function (Transforms priority array into valid schedule)
         def decode_schedule(priorities, t_list, d_dict, c_df):
             sorted_indices = np.argsort(priorities)
             res_avail = {}
@@ -288,23 +314,19 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             task_ends = {}
             schedule = []
             
-            # Identify all unique resources
             for t in t_list:
                 for r in t['resources']: res_avail[r] = 0
                 
             penalty = 0
             
-            # Schedule chronologically based on GA priority
             for idx in sorted_indices:
                 t = t_list[idx]
                 
-                # 1. Wait for predecessors
                 pred_ready_time = 0
                 for pred in t['preceding']:
                     pred_id = f"{t['job']}_{pred}"
                     pred_ready_time = max(pred_ready_time, task_ends.get(pred_id, 0))
                 
-                # 2. Find best resource (earliest possible start)
                 best_start = float('inf')
                 best_res = None
                 
@@ -319,7 +341,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                         best_start = possible_start
                         best_res = r
                 
-                # Assign
                 duration = t['duration']
                 end = best_start + duration
                 
@@ -327,10 +348,9 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 res_last_job[best_res] = t['id']
                 task_ends[t['id']] = end
                 
-                # Check Deadline
                 deadline = int(d_dict.get(t['job'], 999))
                 if end > deadline:
-                    penalty += (end - deadline) * 100 # Heavy penalty for missing deadline
+                    penalty += (end - deadline) * 100 
                 
                 schedule.append({
                     "Job": t['job'], "Process": t['process'], "Resource": best_res,
@@ -342,7 +362,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             makespan = max(task_ends.values()) if task_ends else 0
             return schedule, makespan, penalty
 
-        # Pymoo Problem Definition
         class JobShopGA(ElementwiseProblem):
             def __init__(self, t_list, d_dict, c_df):
                 super().__init__(n_var=len(t_list), n_obj=1, xl=0, xu=1)
@@ -354,7 +373,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 _, makespan, penalty = decode_schedule(x, self.t_list, self.d_dict, self.c_df)
                 out["F"] = makespan + penalty
 
-        # Run Pymoo
         with st.spinner(f"Evolving schedule... ({ga_generations} Generations)"):
             problem = JobShopGA(tasks, deadline_dict, df_changeover)
             algorithm = GA(pop_size=ga_pop_size)
@@ -362,13 +380,11 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             
             res = minimize(problem, algorithm, termination, seed=1, verbose=False)
             
-            # Decode best found
             best_schedule, best_makespan, final_penalty = decode_schedule(res.X, tasks, deadline_dict, df_changeover)
-            
             df_res = pd.DataFrame(best_schedule).sort_values(by=["Start_Day", "Job"])
             
             msg = ""
             if final_penalty > 0:
-                msg = "⚠️ Metaheuristic could not meet all deadlines. Showing best effort."
+                msg = "⚠️ The Evolutionary Algorithm could not meet all deadlines within the given generations. Some jobs are late."
                 
             display_results(df_res, best_makespan, penalty_msg=msg)
