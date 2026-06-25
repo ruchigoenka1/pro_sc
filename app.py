@@ -47,7 +47,6 @@ df_input = st.data_editor(
     }
 )
 
----
 
 ## --------------------------------------------------------
 ## 3. OPTIMIZATION ENGINE (PuLP)
