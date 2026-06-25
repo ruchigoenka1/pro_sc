@@ -175,44 +175,47 @@ if st.button("🚀 Optimize Schedule", type="primary"):
             st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
             
         
-        ## --------------------------------------------------------
-        ## 4. GANTT CHARTS
+## --------------------------------------------------------
+        ## 4. GANTT CHARTS (FULL WIDTH)
         ## --------------------------------------------------------
         st.subheader("📊 Step 2: Interactive Gantt Charts")
         
-        col1, col2 = st.columns(2)
+        # --- Chart 1: Job View ---
+        st.markdown("### 🔹 Chart 1: Job View (Grouped by Job)")
+        fig_job = px.timeline(
+            df_res, 
+            x_start="Start", 
+            x_end="Finish", 
+            y="Job", 
+            color="Resource",
+            text="Process",
+            hover_data=["Resource", "Start_Day", "End_Day"],
+            title="Timeline Grouped by Jobs",
+            height=400 # Added height control for readability
+        )
+        fig_job.update_yaxes(autorange="reversed")
+        # Ensure text labels inside the bars are visible and clean
+        fig_job.update_traces(textposition='inside', insidetextanchor='center')
+        st.plotly_chart(fig_job, use_container_width=True)
         
-        with col1:
-            st.markdown("### 🔹 Chart 1: Job View (Grouped by Job)")
-            # Fixed arguments: x_start and x_end
-            fig_job = px.timeline(
-                df_res, 
-                x_start="Start", 
-                x_end="Finish", 
-                y="Job", 
-                color="Resource",
-                text="Process",
-                hover_data=["Resource", "Start_Day", "End_Day"],
-                title="Timeline Grouped by Jobs"
-            )
-            fig_job.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig_job, use_container_width=True)
-            
-        with col2:
-            st.markdown("### 🔸 Chart 2: Resource View (Grouped by Resource)")
-            # Fixed arguments: x_start and x_end
-            fig_res = px.timeline(
-                df_res, 
-                x_start="Start", 
-                x_end="Finish", 
-                y="Resource", 
-                color="Job",
-                text="Process",
-                hover_data=["Job", "Start_Day", "End_Day"],
-                title="Timeline Grouped by Resources"
-            )
-            fig_res.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig_res, use_container_width=True)
-            
+        st.markdown("---") # Visual separator between charts
+        
+        # --- Chart 2: Resource View ---
+        st.markdown("### 🔸 Chart 2: Resource View (Grouped by Resource)")
+        fig_res = px.timeline(
+            df_res, 
+            x_start="Start", 
+            x_end="Finish", 
+            y="Resource", 
+            color="Job",
+            text="Process",
+            hover_data=["Job", "Start_Day", "End_Day"],
+            title="Timeline Grouped by Resources",
+            height=400 # Added height control for readability
+        )
+        fig_res.update_yaxes(autorange="reversed")
+        fig_res.update_traces(textposition='inside', insidetextanchor='center')
+        st.plotly_chart(fig_res, use_container_width=True)
+        
     else:
         st.error("❌ No feasible schedule found within the specified deadline. Try increasing the project deadline in the sidebar.")
