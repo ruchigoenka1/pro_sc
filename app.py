@@ -171,7 +171,7 @@ if st.button("🚀 Optimize Schedule", type="primary"):
         df_res = pd.DataFrame(results)
         
         # Display Data Table
-        with st.expanders("🔍 View Schedule Data Table"):
+        with st.expander("🔍 View Schedule Data Table"):
             st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
             
         
