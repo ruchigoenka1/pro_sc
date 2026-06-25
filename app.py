@@ -19,8 +19,8 @@ start_date = st.sidebar.date_input("Project Start Date", datetime.today())
 st.sidebar.markdown("---")
 time_limit = st.sidebar.number_input(
     "Optimizer Time Limit (Seconds)", 
-    min_value=1, max_value=600, value=60, step=10,
-    help="Limits how long the solver searches for an optimal solution. Crucial when adding complex changeover matrices."
+    min_value=10, max_value=1200, value=120, step=10,
+    help="Limits how long the solver searches for an optimal solution. Increase this if you get overlapping resource errors."
 )
 
 st.markdown("---")
@@ -69,10 +69,9 @@ st.subheader("⏳ Step 2: Project-Specific Deadlines")
 st.markdown("Set a specific deadline (in days from the start date) for each individual job/product.")
 
 unique_jobs_list = sorted(list(valid_df['Job'].unique()))
-default_deadlines = pd.DataFrame({"Job": unique_jobs_list, "Deadline (Days)": [25] * len(unique_jobs_list)})
+default_deadlines = pd.DataFrame({"Job": unique_jobs_list, "Deadline (Days)": [30] * len(unique_jobs_list)})
 
 df_deadlines = st.data_editor(default_deadlines, hide_index=True, use_container_width=True)
-# Convert to a dictionary for easy lookup during optimization
 deadline_dict = dict(zip(df_deadlines['Job'], df_deadlines['Deadline (Days)']))
 
 st.markdown("---")
@@ -96,13 +95,10 @@ def generate_single_job_flowchart(df, job_name):
             s.attr(rank='same') 
             s.node(proc_id, process, shape='box', style='rounded,filled', fillcolor='#F2D5BA', fontcolor='black', color='white')
             
-            # Combine all eligible resources into a single string
             resources = [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()]
             if resources:
                 resources_str = ", ".join(resources) 
                 res_id = f"{proc_id}_all_resources" 
-                
-                # Create a single triangle containing all resources
                 s.node(res_id, resources_str, shape='triangle', style='filled', fillcolor='#CBE0BE', fontcolor='black', color='white')
                 s.edge(proc_id, res_id, arrowhead='none', style='dotted', color='white')
         
@@ -136,11 +132,10 @@ st.markdown("---")
 st.subheader("🔄 Step 4: Changeover Matrix (Job-Process Level)")
 st.markdown("Define time penalties (in days) when a resource switches between specific processes. e.g., P1_A to P2_A.")
 
-# Create unique IDs for every Job_Process combination
 task_ids = [f"{row['Job']}_{row['Process']}" for idx, row in valid_df.iterrows()]
-
 default_changeover = pd.DataFrame(0, index=task_ids, columns=task_ids)
-with st.expander("📝 Edit Process-Level Changeover Matrix", expanded=True):
+
+with st.expander("📝 Edit Process-Level Changeover Matrix", expanded=False):
     df_changeover = st.data_editor(default_changeover, use_container_width=True)
 
 st.markdown("---")
@@ -191,39 +186,49 @@ if st.button("🚀 Optimize Schedule", type="primary"):
                 prob += start_vars[t['id']] >= end_vars[pred_id]
 
     # 4. Resource Overlap & Process-Level Changeover Time
-    M = 10000 
+    # Dynamically size M to avoid numeric instability, but keep it safely large
+    max_deadline = max(list(deadline_dict.values())) if deadline_dict else 100
+    M = max(1000, max_deadline * 3) 
+    
     for i in range(len(tasks)):
         for j in range(i + 1, len(tasks)):
             t1 = tasks[i]
             t2 = tasks[j]
             common_res = set(t1['resources']).intersection(set(t2['resources']))
             
-            for r in common_res:
-                y = pulp.LpVariable(f"overlap_{t1['id']}_{t2['id']}_{r}", cat='Binary')
+            # Optimization: Only create a sequence variable if they actually share a resource
+            if common_res:
+                y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
                 
-                # Retrieve penalty based on exact Job_Process ID
-                c_time_1_to_2 = int(df_changeover.loc[t1['id'], t2['id']]) if t1['id'] != t2['id'] else 0
-                c_time_2_to_1 = int(df_changeover.loc[t2['id'], t1['id']]) if t1['id'] != t2['id'] else 0
-                
-                prob += start_vars[t2['id']] >= end_vars[t1['id']] + c_time_1_to_2 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
-                prob += start_vars[t1['id']] >= end_vars[t2['id']] + c_time_2_to_1 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
+                for r in common_res:
+                    c_time_1_to_2 = int(df_changeover.loc[t1['id'], t2['id']]) if t1['id'] in df_changeover.index and t2['id'] in df_changeover.columns else 0
+                    c_time_2_to_1 = int(df_changeover.loc[t2['id'], t1['id']]) if t2['id'] in df_changeover.index and t1['id'] in df_changeover.columns else 0
+                    
+                    prob += start_vars[t2['id']] >= end_vars[t1['id']] + c_time_1_to_2 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
+                    prob += start_vars[t1['id']] >= end_vars[t2['id']] + c_time_2_to_1 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
 
     # 5. Project-Specific Deadlines
     for t in tasks:
         job_deadline = int(deadline_dict.get(t['job'], 999))
         prob += end_vars[t['id']] <= job_deadline
 
+    # Solve
     solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
     with st.spinner(f"Optimizing... (Max time limit: {time_limit} seconds)"):
         status = prob.solve(solver)
     
     if pulp.LpStatus[status] in ["Optimal", "Not Solved"]:
+        # If solver returned values, parse them
         if start_vars[tasks[0]['id']].varValue is not None:
-            st.success(f"✨ Schedule Found! Total overall duration: **{int(makespan.varValue)} days**.")
-            
             results = []
             for t in tasks:
-                selected_resource = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue == 1][0]
+                # Use > 0.5 to safely extract binary 1s from relaxed floats
+                selected_resource = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue is not None and assign_vars[(t['id'], r)].varValue > 0.5]
+                # Fallback safeguard
+                if not selected_resource:
+                    continue
+                selected_resource = selected_resource[0]
+                
                 s_val = int(start_vars[t['id']].varValue)
                 e_val = int(end_vars[t['id']].varValue)
                 
@@ -239,22 +244,44 @@ if st.button("🚀 Optimize Schedule", type="primary"):
                 
             df_res = pd.DataFrame(results).sort_values(by=["Start_Day", "Job"])
             
-            with st.expander("🔍 View Schedule Data Table"):
-                st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
+            # --- STRICT VALIDITY CHECK ---
+            # Ensure the solver didn't give us a broken schedule due to a timeout
+            is_valid_schedule = True
+            df_res_check = df_res.sort_values(by=["Resource", "Start_Day"])
             
-            st.subheader("📊 Step 5: Interactive Gantt Charts")
-            
-            fig_job = px.timeline(df_res, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", title="Timeline Grouped by Jobs", height=450)
-            fig_job.update_yaxes(autorange="reversed")
-            fig_job.update_traces(textposition='inside', insidetextanchor='middle')
-            st.plotly_chart(fig_job, use_container_width=True)
-            
-            st.markdown("---")
-            
-            fig_res = px.timeline(df_res, x_start="Start", x_end="Finish", y="Resource", color="Job", text="Process", title="Timeline Grouped by Resources", height=450)
-            fig_res.update_yaxes(autorange="reversed")
-            fig_res.update_traces(textposition='inside', insidetextanchor='middle')
-            st.plotly_chart(fig_res, use_container_width=True)
+            for res in df_res_check['Resource'].unique():
+                res_tasks = df_res_check[df_res_check['Resource'] == res]
+                prev_end = -1
+                for idx, row in res_tasks.iterrows():
+                    if row['Start_Day'] < prev_end:
+                        is_valid_schedule = False
+                        break
+                    prev_end = row['End_Day']
+                if not is_valid_schedule:
+                    break
+                    
+            if not is_valid_schedule:
+                st.error("⚠️ **Solver Timeout:** The optimizer ran out of time and returned a mathematically invalid schedule with overlapping resources. Please **increase the Optimizer Time Limit** in the sidebar, or relax your project deadlines.")
+            else:
+                # Plot successful schedule
+                st.success(f"✨ Strict Schedule Found! Total overall duration: **{int(makespan.varValue)} days**.")
+                
+                with st.expander("🔍 View Schedule Data Table"):
+                    st.dataframe(df_res[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True)
+                
+                st.subheader("📊 Step 5: Interactive Gantt Charts")
+                
+                fig_job = px.timeline(df_res, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", title="Timeline Grouped by Jobs", height=450)
+                fig_job.update_yaxes(autorange="reversed")
+                fig_job.update_traces(textposition='inside', insidetextanchor='middle')
+                st.plotly_chart(fig_job, use_container_width=True)
+                
+                st.markdown("---")
+                
+                fig_res = px.timeline(df_res, x_start="Start", x_end="Finish", y="Resource", color="Job", text="Process", title="Timeline Grouped by Resources", height=450)
+                fig_res.update_yaxes(autorange="reversed")
+                fig_res.update_traces(textposition='inside', insidetextanchor='middle')
+                st.plotly_chart(fig_res, use_container_width=True)
         else:
             st.error("❌ No feasible schedule found. Check if your project-specific deadlines are too tight.")
     else:
