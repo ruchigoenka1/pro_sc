@@ -15,21 +15,28 @@ from pymoo.termination import get_termination
 st.set_page_config(layout="wide", page_title="Advanced Job Scheduler")
 
 ## --------------------------------------------------------
-## 1. TITLE & SETTINGS
+## 1. TITLE & MODE SELECTION
 ## --------------------------------------------------------
 st.title("🗓️ Smart Job & Resource Scheduler")
-st.markdown("Optimize your production schedules dynamically. Features include precedence constraints, visual flow validation, sequence-dependent changeovers, and project-specific deadlines.")
+st.markdown("Optimize production workflows or run strategic capacity assessments dynamically.")
 
-st.sidebar.header("⚙️ Solver Settings")
+st.sidebar.header("⚙️ Global Settings")
 start_date = st.sidebar.date_input("Project Start Date", datetime.today())
 
-# Terminology updated for demo purposes
+# NEW: Toggle between the two primary business analyses
+analysis_mode = st.sidebar.selectbox(
+    "Select Analysis Mode:",
+    ("Demand Scheduling (Fixed Deadlines)", "Maximum Capacity Assessment (Fixed Time Span)")
+)
+
 solver_choice = st.sidebar.radio(
     "Select Solving Engine:", 
     ("Optimizer", "Evolutionary Algorithm")
 )
 
 st.sidebar.markdown("---")
+st.sidebar.header("⏱️ Engine Parameters")
+
 if solver_choice == "Optimizer":
     time_limit = st.sidebar.number_input(
         "Optimizer Time Limit (Seconds)", 
@@ -37,24 +44,23 @@ if solver_choice == "Optimizer":
         help="Limits how long the solver searches. Increase if you get timeout errors."
     )
 else:
-    # Labels updated for demo purposes
     ga_generations = st.sidebar.number_input(
         "No of Generation", 
-        min_value=50, max_value=1000, value=100, step=50,
-        help="How many evolutionary cycles to run. Higher = better results but slower."
+        min_value=50, max_value=1000, value=100, step=50
     )
     ga_pop_size = st.sidebar.number_input(
         "Size", 
-        min_value=20, max_value=500, value=50, step=10,
-        help="Number of schedules tested per generation."
+        min_value=20, max_value=500, value=50, step=10
     )
 
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 2. DATA ENTRY
+## 2. STEP 1: DATA ENTRY (BASE RECIPES / ORDERS)
 ## --------------------------------------------------------
 st.subheader("📋 Step 1: Define Job & Process Data")
+if analysis_mode == "Maximum Capacity Assessment (Fixed Time Span)":
+    st.info("💡 **Capacity Mode Active:** Enter details below to represent **1 Unit** of the job. The system will figure out how many units can fit in your timeline.")
 
 default_data = pd.DataFrame([
     {"Job": "P1", "Process": "A", "Eligible_Resources": "R1", "Duration": 2, "Preceding_Process": ""},
@@ -82,25 +88,33 @@ else:
     initial_data = default_data
 
 df_input = st.data_editor(initial_data, num_rows="dynamic", use_container_width=True)
-
 valid_df = df_input[(df_input['Job'] != '') & (df_input['Process'] != '')].copy()
 
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 3. PROJECT DEADLINES
+## 3. STEP 2: TEMPORAL BOUNDS (DEADLINES OR TIME SPAN)
 ## --------------------------------------------------------
-st.subheader("⏳ Step 2: Project-Specific Deadlines")
 unique_jobs_list = sorted(list(valid_df['Job'].unique()))
-default_deadlines = pd.DataFrame({"Job": unique_jobs_list, "Deadline (Days)": [30] * len(unique_jobs_list)})
 
-df_deadlines = st.data_editor(default_deadlines, hide_index=True, use_container_width=True)
-deadline_dict = dict(zip(df_deadlines['Job'], df_deadlines['Deadline (Days)']))
+if analysis_mode == "Demand Scheduling (Fixed Deadlines)":
+    st.subheader("⏳ Step 2: Project-Specific Deadlines")
+    st.markdown("Set a specific deadline (in days from the start date) for each individual job/product.")
+    default_deadlines = pd.DataFrame({"Job": unique_jobs_list, "Deadline (Days)": [30] * len(unique_jobs_list)})
+    df_deadlines = st.data_editor(default_deadlines, hide_index=True, use_container_width=True)
+    deadline_dict = dict(zip(df_deadlines['Job'], df_deadlines['Deadline (Days)']))
+else:
+    st.subheader("⏳ Step 2: Planning Time Horizon & Assessment Bounds")
+    col_cap1, col_cap2 = st.columns(2)
+    with col_cap1:
+        time_span = st.number_input("Planning Time Span Horizon (Days)", min_value=10, max_value=5000, value=1000, step=50, help="The model maximizes throughput within this window.")
+    with col_cap2:
+        max_instances = st.number_input("Max Instances per Job Type to Evaluate", min_value=2, max_value=50, value=8, step=1, help="Upper variable bound for tracking scaling configurations.")
 
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 4. VISUAL MAP GENERATION
+## 4. STEP 3: VISUAL MAP GENERATION
 ## --------------------------------------------------------
 st.subheader("🗺️ Step 3: Verify Process Flow")
 
@@ -113,11 +127,9 @@ def generate_single_job_flowchart(df, job_name):
     for idx, row in job_data.iterrows():
         process = str(row['Process']).strip()
         proc_id = f"{job_name}_{process}"
-        
         with dot.subgraph() as s:
             s.attr(rank='same') 
             s.node(proc_id, process, shape='box', style='rounded,filled', fillcolor='#F2D5BA', fontcolor='black', color='white')
-            
             resources = [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()]
             if resources:
                 resources_str = ", ".join(resources) 
@@ -133,7 +145,6 @@ def generate_single_job_flowchart(df, job_name):
                 dot.edge(pred_id, proc_id, color='#E28743', penwidth='2')
         else:
             dot.edge(job_name, proc_id, color='#E28743', penwidth='2')
-            
     return dot
 
 with st.expander("👁️ View Process Flow Map", expanded=False):
@@ -149,7 +160,7 @@ with st.expander("👁️ View Process Flow Map", expanded=False):
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 5. CHANGEOVER MATRIX 
+## 5. STEP 4: CHANGEOVER MATRIX
 ## --------------------------------------------------------
 st.subheader("🔄 Step 4: Changeover Matrix (Job-Process Level)")
 task_ids = [f"{row['Job']}_{row['Process']}" for idx, row in valid_df.iterrows()]
@@ -161,230 +172,307 @@ with st.expander("📝 Edit Process-Level Changeover Matrix", expanded=False):
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 6. OPTIMIZATION LOGIC & RESULTS
+## 6. OPTIMIZATION LOGIC & RESULTS COMPONENT
 ## --------------------------------------------------------
 
-# Shared result display function
-def display_results(results_df, total_makespan, penalty_msg=""):
+def display_scheduling_results(results_df, total_makespan, penalty_msg=""):
     st.success(f"✨ Schedule Found! Total overall duration: **{total_makespan} days**.")
-    if penalty_msg:
-        st.warning(penalty_msg)
+    if penalty_msg: st.warning(penalty_msg)
         
-    # --- NEW: Job Completion & Deadline Status Table ---
     st.subheader("📅 Step 5: Project Completion & Deadline Status")
-    
-    # Calculate exactly when each job finishes
-    job_summary = results_df.groupby("Job").agg(
-        Finished_Day=("End_Day", "max"),
-        Finish_Date=("Finish", "max")
-    ).reset_index()
-    
-    # Map the targeted deadlines
+    job_summary = results_df.groupby("Job").agg(Finished_Day=("End_Day", "max"), Finish_Date=("Finish", "max")).reset_index()
     job_summary["Deadline (Days)"] = job_summary["Job"].apply(lambda x: int(deadline_dict.get(x, 999)))
-    
-    # Reorganize and rename for the UI
     job_summary = job_summary[["Job", "Finish_Date", "Finished_Day", "Deadline (Days)"]]
     job_summary.rename(columns={"Finished_Day": "Total Days Taken", "Finish_Date": "Completion Date"}, inplace=True)
     
-    # Highlight function: Red background if it missed the deadline
     def highlight_late_jobs(row):
         if row["Total Days Taken"] > row["Deadline (Days)"]:
             return ['background-color: rgba(255, 75, 75, 0.3); color: white; font-weight: bold;'] * len(row)
         return [''] * len(row)
-        
     st.dataframe(job_summary.style.apply(highlight_late_jobs, axis=1), use_container_width=True, hide_index=True)
     
-    # --- Detailed Task View ---
     with st.expander("🔍 View Detailed Task Schedule Table"):
         st.dataframe(results_df[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True, hide_index=True)
     
-    st.subheader("📊 Step 6: Interactive Gantt Charts")
+    render_gantt_charts(results_df)
+
+def display_capacity_results(results_df, horizon):
+    st.success("✨ Strategic Capacity Assessment Complete!")
     
-    fig_job = px.timeline(results_df, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", title="Timeline Grouped by Jobs", height=450)
+    # 1. Output Summary Table
+    st.subheader("📊 Step 5: Optimal Capacity Output Summary")
+    results_df["Instance_Count"] = 1
+    summary = results_df.groupby("Base_Job").agg(
+        Total_Units_Produced=("Job", "nunique"),
+        Last_Unit_Finished_Day=("End_Day", "max")
+    ).reset_index()
+    summary.rename(columns={"Base_Job": "Job Type"}, inplace=True)
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+    
+    # 2. Machine Utilization Statistics
+    st.subheader("🏭 Step 6: Asset Utilization Metrics")
+    all_resources = results_df['Resource'].unique()
+    metric_cols = st.columns(len(all_resources))
+    
+    for idx, res in enumerate(sorted(all_resources)):
+        res_data = results_df[results_df['Resource'] == res]
+        total_active_time = res_data['Duration'].sum()
+        utilization_pct = min(100.0, (total_active_time / horizon) * 100)
+        with metric_cols[idx]:
+            st.metric(label=f"Machine {res} Utilization", value=f"{utilization_pct:.1f}%", delta=f"{total_active_time} active days")
+            
+    with st.expander("🔍 View Volumetric Production Sequence Logs"):
+        st.dataframe(results_df[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True, hide_index=True)
+        
+    render_gantt_charts(results_df)
+
+def render_gantt_charts(df):
+    st.subheader("📊 Interactive Sequence Gantt Charts")
+    fig_job = px.timeline(df, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", title="Timeline Grouped by Production Batches", height=450)
     fig_job.update_yaxes(autorange="reversed")
     fig_job.update_traces(textposition='inside', insidetextanchor='middle')
     st.plotly_chart(fig_job, use_container_width=True)
-    
     st.markdown("---")
-    
-    fig_res = px.timeline(results_df, x_start="Start", x_end="Finish", y="Resource", color="Job", text="Process", title="Timeline Grouped by Resources", height=450)
+    fig_res = px.timeline(df, x_start="Start", x_end="Finish", y="Resource", color="Job", text="Process", title="Timeline Grouped by Resource Allocation", height=450)
     fig_res.update_yaxes(autorange="reversed")
     fig_res.update_traces(textposition='inside', insidetextanchor='middle')
     st.plotly_chart(fig_res, use_container_width=True)
 
+# Parse Baseline Data
+base_tasks = []
+for idx, row in valid_df.iterrows():
+    base_tasks.append({
+        'id': f"{row['Job']}_{row['Process']}",
+        'job': row['Job'],
+        'process': row['Process'],
+        'resources': [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()],
+        'duration': int(row['Duration']),
+        'preceding': [p.strip() for p in str(row['Preceding_Process']).split(',') if p.strip()]
+    })
 
 if st.button(f"🚀 Run {solver_choice}", type="primary"):
-    
-    # Parse Tasks universally
-    tasks = []
-    for idx, row in valid_df.iterrows():
-        tasks.append({
-            'id': f"{row['Job']}_{row['Process']}",
-            'job': row['Job'],
-            'process': row['Process'],
-            'resources': [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()],
-            'duration': int(row['Duration']),
-            'preceding': [p.strip() for p in str(row['Preceding_Process']).split(',') if p.strip()]
-        })
+    if not base_tasks:
+        st.error("Please ensure you have inputted process recipes in Step 1.")
+        st.stop()
 
-    # ==========================================
-    # ENGINE A: Optimizer (PuLP)
-    # ==========================================
-    if solver_choice == "Optimizer":
-        prob = pulp.LpProblem("Job_Scheduling", pulp.LpMinimize)
-        
-        start_vars = {t['id']: pulp.LpVariable(f"start_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
-        end_vars = {t['id']: pulp.LpVariable(f"end_{t['id']}", lowBound=0, cat='Integer') for t in tasks}
-        assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in tasks for r in t['resources']}
-        makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Integer')
-        
-        prob += makespan
-        
-        for t in tasks:
-            prob += end_vars[t['id']] == start_vars[t['id']] + t['duration']
-            prob += makespan >= end_vars[t['id']]
-            prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
-            for pred in t['preceding']:
-                pred_id = f"{t['job']}_{pred}"
-                if pred_id in start_vars:
-                    prob += start_vars[t['id']] >= end_vars[pred_id]
-
-        max_deadline = max(list(deadline_dict.values())) if deadline_dict else 100
-        M = max(1000, max_deadline * 3) 
-        
-        for i in range(len(tasks)):
-            for j in range(i + 1, len(tasks)):
-                t1, t2 = tasks[i], tasks[j]
-                common_res = set(t1['resources']).intersection(set(t2['resources']))
-                if common_res:
-                    y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
-                    for r in common_res:
-                        c12 = int(df_changeover.loc[t1['id'], t2['id']]) if t1['id'] in df_changeover.index and t2['id'] in df_changeover.columns else 0
-                        c21 = int(df_changeover.loc[t2['id'], t1['id']]) if t2['id'] in df_changeover.index and t1['id'] in df_changeover.columns else 0
-                        prob += start_vars[t2['id']] >= end_vars[t1['id']] + c12 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
-                        prob += start_vars[t1['id']] >= end_vars[t2['id']] + c21 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
-
-        for t in tasks:
-            prob += end_vars[t['id']] <= int(deadline_dict.get(t['job'], 999))
-
-        solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
-        with st.spinner(f"Optimizing schedule... (Max {time_limit}s)"):
-            status = prob.solve(solver)
-        
-        if pulp.LpStatus[status] in ["Optimal", "Not Solved"] and start_vars[tasks[0]['id']].varValue is not None:
-            results = []
-            for t in tasks:
-                sel_res = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue is not None and assign_vars[(t['id'], r)].varValue > 0.5]
-                if not sel_res: continue
-                s_val, e_val = int(start_vars[t['id']].varValue), int(end_vars[t['id']].varValue)
-                results.append({
-                    "Job": t['job'], "Process": t['process'], "Resource": sel_res[0],
-                    "Start_Day": s_val, "End_Day": e_val,
-                    "Start": pd.to_datetime(start_date) + timedelta(days=s_val),
-                    "Finish": pd.to_datetime(start_date) + timedelta(days=e_val)
-                })
-                
-            df_res = pd.DataFrame(results).sort_values(by=["Start_Day", "Job"])
+    # =========================================================================
+    # ANALYSIS MODE: DEMAND SCHEDULING (FIXED OBJECTS)
+    # =========================================================================
+    if analysis_mode == "Demand Scheduling (Fixed Deadlines)":
+        if solver_choice == "Optimizer":
+            prob = pulp.LpProblem("Demand_Scheduling", pulp.LpMinimize)
+            start_vars = {t['id']: pulp.LpVariable(f"start_{t['id']}", lowBound=0, cat='Integer') for t in base_tasks}
+            end_vars = {t['id']: pulp.LpVariable(f"end_{t['id']}", lowBound=0, cat='Integer') for t in base_tasks}
+            assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in base_tasks for r in t['resources']}
+            makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Integer')
             
-            # Validation Check
-            is_valid = True
-            df_res_check = df_res.sort_values(by=["Resource", "Start_Day"])
-            for res in df_res_check['Resource'].unique():
-                prev_end = -1
-                for _, row in df_res_check[df_res_check['Resource'] == res].iterrows():
-                    if row['Start_Day'] < prev_end: is_valid = False
-                    prev_end = row['End_Day']
-                    
-            if not is_valid:
-                st.error("⚠️ **Timeout:** The optimizer could not find a strictly valid schedule in the allotted time. Please increase the Time Limit.")
-            else:
-                display_results(df_res, int(makespan.varValue))
-        else:
-            st.error("❌ No feasible schedule found. Deadlines may be too tight for the given workloads and changeovers.")
-
-
-    # ==========================================
-    # ENGINE B: Evolutionary Algorithm
-    # ==========================================
-    else:
-        def decode_schedule(priorities, t_list, d_dict, c_df):
-            sorted_indices = np.argsort(priorities)
-            res_avail = {}
-            res_last_job = {}
-            task_ends = {}
-            schedule = []
+            # Hybrid objective: Minimize makespan primarily, pull individuals left ASAP
+            prob += makespan * 1000 + pulp.lpSum([end_vars[t['id']] for t in base_tasks])
             
-            for t in t_list:
-                for r in t['resources']: res_avail[r] = 0
-                
-            penalty = 0
-            
-            for idx in sorted_indices:
-                t = t_list[idx]
-                
-                pred_ready_time = 0
+            for t in base_tasks:
+                prob += end_vars[t['id']] == start_vars[t['id']] + t['duration']
+                prob += makespan >= end_vars[t['id']]
+                prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
                 for pred in t['preceding']:
                     pred_id = f"{t['job']}_{pred}"
-                    pred_ready_time = max(pred_ready_time, task_ends.get(pred_id, 0))
+                    if pred_id in start_vars: prob += start_vars[t['id']] >= end_vars[pred_id]
+
+            M = max(1000, max(list(deadline_dict.values())) * 3) if deadline_dict else 3000
+            for i in range(len(base_tasks)):
+                for j in range(i + 1, len(base_tasks)):
+                    t1, t2 = base_tasks[i], base_tasks[j]
+                    common_res = set(t1['resources']).intersection(set(t2['resources']))
+                    if common_res:
+                        y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
+                        for r in common_res:
+                            c12 = int(df_changeover.loc[t1['id'], t2['id']]) if t1['id'] in df_changeover.index and t2['id'] in df_changeover.columns else 0
+                            c21 = int(df_changeover.loc[t2['id'], t1['id']]) if t2['id'] in df_changeover.index and t1['id'] in df_changeover.columns else 0
+                            prob += start_vars[t2['id']] >= end_vars[t1['id']] + c12 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y)
+                            prob += start_vars[t1['id']] >= end_vars[t2['id']] + c21 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y)
+
+            for t in base_tasks: prob += end_vars[t['id']] <= int(deadline_dict.get(t['job'], 999))
+
+            solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
+            with st.spinner("Calculating exact optimal schedule..."): status = prob.solve(solver)
+            
+            if pulp.LpStatus[status] in ["Optimal", "Not Solved"] and start_vars[base_tasks[0]['id']].varValue is not None:
+                results = []
+                for t in base_tasks:
+                    sel_res = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue > 0.5][0]
+                    s_val, e_val = int(start_vars[t['id']].varValue), int(end_vars[t['id']].varValue)
+                    results.append({
+                        "Job": t['job'], "Process": t['process'], "Resource": sel_res, "Duration": t['duration'],
+                        "Start_Day": s_val, "End_Day": e_val,
+                        "Start": pd.to_datetime(start_date) + timedelta(days=s_val), "Finish": pd.to_datetime(start_date) + timedelta(days=e_val)
+                    })
+                display_scheduling_results(pd.DataFrame(results), int(makespan.varValue))
+            else:
+                st.error("❌ No feasible schedule found. Deadlines might be too tight.")
                 
-                best_start = float('inf')
-                best_res = None
-                
-                for r in t['resources']:
-                    c_time = 0
-                    last_task_id = res_last_job.get(r)
-                    if last_task_id and last_task_id in c_df.index and t['id'] in c_df.columns:
-                        c_time = int(c_df.loc[last_task_id, t['id']])
-                        
-                    possible_start = max(pred_ready_time, res_avail.get(r, 0) + c_time)
-                    if possible_start < best_start:
-                        best_start = possible_start
-                        best_res = r
-                
-                duration = t['duration']
-                end = best_start + duration
-                
-                res_avail[best_res] = end
-                res_last_job[best_res] = t['id']
-                task_ends[t['id']] = end
-                
-                deadline = int(d_dict.get(t['job'], 999))
-                if end > deadline:
-                    penalty += (end - deadline) * 100 
-                
-                schedule.append({
-                    "Job": t['job'], "Process": t['process'], "Resource": best_res,
-                    "Start_Day": best_start, "End_Day": end,
-                    "Start": pd.to_datetime(start_date) + timedelta(days=best_start),
-                    "Finish": pd.to_datetime(start_date) + timedelta(days=end)
+        else: # Evolutionary Algorithm - Demand Mode
+            # Reuse the structural decode function built previously
+            def decode_demand(priorities, t_list, d_dict, c_df):
+                sorted_idx = np.argsort(priorities)
+                res_avail, res_last, task_ends, sched = {}, {}, {}, []
+                for t in t_list: 
+                    for r in t['resources']: res_avail[r] = 0
+                penalty = 0
+                for idx in sorted_idx:
+                    t = t_list[idx]
+                    p_ready = max([task_ends.get(f"{t['job']}_{p}", 0) for p in t['preceding']] + [0])
+                    best_s, best_r = float('inf'), None
+                    for r in t['resources']:
+                        c_time = int(c_df.loc[res_last[r], t['id']]) if r in res_last and res_last[r] in c_df.index else 0
+                        ps = max(p_ready, res_avail[r] + c_time)
+                        if ps < best_s: best_s, best_r = ps, r
+                    end = best_s + t['duration']
+                    res_avail[best_r], res_last[best_r], task_ends[t['id']] = end, t['id'], end
+                    if end > int(d_dict.get(t['job'], 999)): penalty += (end - int(d_dict.get(t['job'], 999))) * 100
+                    sched.append({
+                        "Job": t['job'], "Process": t['process'], "Resource": best_r, "Duration": t['duration'],
+                        "Start_Day": best_s, "End_Day": end,
+                        "Start": pd.to_datetime(start_date) + timedelta(days=best_s), "Finish": pd.to_datetime(start_date) + timedelta(days=end)
+                    })
+                return sched, max(task_ends.values()) if task_ends else 0, penalty
+
+            class DemandGA(ElementwiseProblem):
+                def __init__(self, tl, dd, cf): super().__init__(n_var=len(tl), n_obj=1, xl=0, xu=1); self.tl, self.dd, self.cf = tl, dd, cf
+                def _evaluate(self, x, out, *args, **kwargs): _, ms, pen = decode_demand(x, self.tl, self.dd, self.cf); out["F"] = ms + pen
+
+            with st.spinner("Evolving demand schedule..."):
+                res = minimize(DemandGA(base_tasks, deadline_dict, df_changeover), GA(pop_size=ga_pop_size), get_termination("n_gen", ga_generations), seed=1)
+                best_sched, best_ms, final_pen = decode_demand(res.X, base_tasks, deadline_dict, df_changeover)
+                msg = "⚠️ Deadlines unachievable within set bounds." if final_pen > 0 else ""
+                display_scheduling_results(pd.DataFrame(best_sched), best_ms, msg)
+
+    # =========================================================================
+    # ANALYSIS MODE: MAXIMUM CAPACITY ASSESSMENT (NEW LOGIC)
+    # =========================================================================
+    else:
+        # Build expanded task list mimicking potential replicates
+        expanded_tasks = []
+        for k in range(1, max_instances + 1):
+            for bt in base_tasks:
+                expanded_tasks.append({
+                    'id': f"{bt['job']}_Copy{k}_{bt['process']}",
+                    'base_id': bt['id'],
+                    'job': bt['job'],
+                    'copy_num': k,
+                    'job_display': f"{bt['job']} (Unit {k})",
+                    'process': bt['process'],
+                    'resources': bt['resources'],
+                    'duration': bt['duration'],
+                    'preceding': bt['preceding']
                 })
+
+        if solver_choice == "Optimizer":
+            prob = pulp.LpProblem("Capacity_Maximization", pulp.LpMaximize)
+            
+            start_vars = {t['id']: pulp.LpVariable(f"start_{t['id']}", lowBound=0, cat='Integer') for t in expanded_tasks}
+            end_vars = {t['id']: pulp.LpVariable(f"end_{t['id']}", lowBound=0, cat='Integer') for t in expanded_tasks}
+            assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in expanded_tasks for r in t['resources']}
+            active_vars = {(j, k): pulp.LpVariable(f"active_{j}_{k}", cat='Binary') for j in unique_jobs_list for k in range(1, max_instances + 1)}
+            
+            # Objective: Maximize total loaded processing days on all machines
+            prob += pulp.lpSum([t['duration'] * active_vars[t['job'], t['copy_num']] for t in expanded_tasks])
+            
+            for t in expanded_tasks:
+                prob += end_vars[t['id']] == start_vars[t['id']] + t['duration'] * active_vars[t['job'], t['copy_num']]
+                prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == active_vars[t['job'], t['copy_num']]
+                prob += end_vars[t['id']] <= time_span
                 
-            makespan = max(task_ends.values()) if task_ends else 0
-            return schedule, makespan, penalty
-
-        class JobShopGA(ElementwiseProblem):
-            def __init__(self, t_list, d_dict, c_df):
-                super().__init__(n_var=len(t_list), n_obj=1, xl=0, xu=1)
-                self.t_list = t_list
-                self.d_dict = d_dict
-                self.c_df = c_df
-
-            def _evaluate(self, x, out, *args, **kwargs):
-                _, makespan, penalty = decode_schedule(x, self.t_list, self.d_dict, self.c_df)
-                out["F"] = makespan + penalty
-
-        with st.spinner(f"Evolving schedule... ({ga_generations} Generations)"):
-            problem = JobShopGA(tasks, deadline_dict, df_changeover)
-            algorithm = GA(pop_size=ga_pop_size)
-            termination = get_termination("n_gen", ga_generations)
+                for pred in t['preceding']:
+                    pred_id = f"{t['job']}_Copy{t['copy_num']}_{pred}"
+                    if pred_id in start_vars: prob += start_vars[t['id']] >= end_vars[pred_id]
             
-            res = minimize(problem, algorithm, termination, seed=1, verbose=False)
+            # Symmetric Sequencing: Force copy k to be filled sequentially
+            for j in unique_jobs_list:
+                for k in range(2, max_instances + 1):
+                    prob += active_vars[j, k] <= active_vars[j, k-1]
+
+            M = max(1000, time_span * 3)
+            for i in range(len(expanded_tasks)):
+                for j in range(i + 1, len(expanded_tasks)):
+                    t1, t2 = expanded_tasks[i], expanded_tasks[j]
+                    common_res = set(t1['resources']).intersection(set(t2['resources']))
+                    if common_res:
+                        y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
+                        for r in common_res:
+                            c12 = int(df_changeover.loc[t1['base_id'], t2['base_id']]) if t1['base_id'] in df_changeover.index and t2['base_id'] in df_changeover.columns else 0
+                            c21 = int(df_changeover.loc[t2['base_id'], t1['base_id']]) if t2['base_id'] in df_changeover.index and t1['base_id'] in df_changeover.columns else 0
+                            
+                            prob += start_vars[t2['id']] >= end_vars[t1['id']] + c12 - M * (3 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] - y) - M * (1 - active_vars[t1['job'], t1['copy_num']]) - M * (1 - active_vars[t2['job'], t2['copy_num']])
+                            prob += start_vars[t1['id']] >= end_vars[t2['id']] + c21 - M * (2 - assign_vars[(t1['id'], r)] - assign_vars[(t2['id'], r)] + y) - M * (1 - active_vars[t1['job'], t1['copy_num']]) - M * (1 - active_vars[t2['job'], t2['copy_num']])
+
+            solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=False)
+            with st.spinner("Analyzing absolute volumetric capacity boundaries..."): status = prob.solve(solver)
             
-            best_schedule, best_makespan, final_penalty = decode_schedule(res.X, tasks, deadline_dict, df_changeover)
-            df_res = pd.DataFrame(best_schedule).sort_values(by=["Start_Day", "Job"])
-            
-            msg = ""
-            if final_penalty > 0:
-                msg = "⚠️ The Evolutionary Algorithm could not meet all deadlines within the given generations. Some jobs are late."
+            if pulp.LpStatus[status] in ["Optimal", "Not Solved"] and active_vars[(unique_jobs_list[0], 1)].varValue is not None:
+                results = []
+                for t in expanded_tasks:
+                    if active_vars[(t['job'], t['copy_num'])].varValue < 0.5: continue
+                    sel_res = [r for r in t['resources'] if assign_vars[(t['id'], r)].varValue > 0.5][0]
+                    s_val, e_val = int(start_vars[t['id']].varValue), int(end_vars[t['id']].varValue)
+                    results.append({
+                        "Job": t['job_display'], "Base_Job": t['job'], "Process": t['process'], "Resource": sel_res, "Duration": t['duration'],
+                        "Start_Day": s_val, "End_Day": e_val,
+                        "Start": pd.to_datetime(start_date) + timedelta(days=s_val), "Finish": pd.to_datetime(start_date) + timedelta(days=e_val)
+                    })
+                if results: display_capacity_results(pd.DataFrame(results), time_span)
+                else: st.warning("No jobs could fit into the planning time span.")
+            else:
+                st.error("❌ Capacity estimation failed. Loosen structural parameters or increase run time.")
+
+        else: # Evolutionary Algorithm - Capacity Mode
+            def decode_capacity(priorities, t_list, horizon, c_df):
+                sorted_idx = np.argsort(priorities)
+                res_avail, res_last, task_ends, sched = {}, {}, {}, []
+                for t in t_list: 
+                    for r in t['resources']: res_avail[r] = 0
                 
-            display_results(df_res, best_makespan, penalty_msg=msg)
+                cancelled_copies = set()
+                total_duration = 0
+                
+                for idx in sorted_idx:
+                    t = t_list[idx]
+                    copy_key = (t['job'], t['copy_num'])
+                    if copy_key in cancelled_copies: continue
+                    
+                    # Ensure precedence constraint rules match replica flow
+                    pred_ready, possible = 0, True
+                    for pred in t['preceding']:
+                        pred_id = f"{t['job']}_Copy{t['copy_num']}_{pred}"
+                        if pred_id in task_ends: pred_ready = max(pred_ready, task_ends[pred_id])
+                        else: possible = False; break
+                    
+                    if not possible: cancelled_copies.add(copy_key); continue
+                    
+                    best_s, best_r = float('inf'), None
+                    for r in t['resources']:
+                        c_time = int(c_df.loc[res_last[r], t['base_id']]) if r in res_last and res_last[r] in c_df.index else 0
+                        ps = max(pred_ready, res_avail[r] + c_time)
+                        if ps < best_s: best_s, best_r = ps, r
+                        
+                    if best_s + t['duration'] > horizon:
+                        cancelled_copies.add(copy_key); continue
+                        
+                    end = best_s + t['duration']
+                    res_avail[best_r], res_last[best_r], task_ends[t['id']] = end, t['base_id'], end
+                    total_duration += t['duration']
+                    
+                    sched.append({
+                        "Job": t['job_display'], "Base_Job": t['job'], "Process": t['process'], "Resource": best_r, "Duration": t['duration'],
+                        "Start_Day": best_s, "End_Day": end,
+                        "Start": pd.to_datetime(start_date) + timedelta(days=best_s), "Finish": pd.to_datetime(start_date) + timedelta(days=end)
+                    })
+                return sched, total_duration
+
+            class CapacityGA(ElementwiseProblem):
+                def __init__(self, tl, hz, cf): super().__init__(n_var=len(tl), n_obj=1, xl=0, xu=1); self.tl, self.hz, self.cf = tl, hz, cf
+                def _evaluate(self, x, out, *args, **kwargs): _, tot_dur = decode_capacity(x, self.tl, self.hz, self.cf); out["F"] = -tot_dur # Maximize
+
+            with st.spinner("Executing evolutionary capacity packing iteration..."):
+                res = minimize(CapacityGA(expanded_tasks, time_span, df_changeover), GA(pop_size=ga_pop_size), get_termination("n_gen", ga_generations), seed=1)
+                best_sched, _ = decode_capacity(res.X, expanded_tasks, time_span, df_changeover)
+                if best_sched: display_capacity_results(pd.DataFrame(best_sched), time_span)
+                else: st.warning("No units managed to pack within the requested horizon limit.")
