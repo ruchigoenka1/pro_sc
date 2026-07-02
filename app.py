@@ -23,11 +23,19 @@ st.markdown("Optimize production workflows or run strategic capacity assessments
 st.sidebar.header("⚙️ Global Settings")
 start_date = st.sidebar.date_input("Project Start Date", datetime.today())
 
-# NEW: Toggle between the two primary business analyses
+# Toggle between the two primary business analyses
 analysis_mode = st.sidebar.selectbox(
     "Select Analysis Mode:",
     ("Demand Scheduling (Fixed Deadlines)", "Maximum Capacity Assessment (Fixed Time Span)")
 )
+
+# NEW: Strategy selection inside Demand Scheduling
+scheduling_strategy = "As Soon As Possible (ASAP)"
+if analysis_mode == "Demand Scheduling (Fixed Deadlines)":
+    scheduling_strategy = st.sidebar.radio(
+        "Scheduling Strategy Objective:",
+        ("As Soon As Possible (ASAP)", "Just In Time / Close to Due Date")
+    )
 
 solver_choice = st.sidebar.radio(
     "Select Solving Engine:", 
@@ -53,7 +61,7 @@ else:
         min_value=20, max_value=500, value=50, step=10
     )
 
-st.markdown("---")
+st.sidebar.markdown("---")
 
 ## --------------------------------------------------------
 ## 2. STEP 1: DATA ENTRY (BASE RECIPES / ORDERS)
@@ -107,9 +115,9 @@ else:
     st.subheader("⏳ Step 2: Planning Time Horizon & Assessment Bounds")
     col_cap1, col_cap2 = st.columns(2)
     with col_cap1:
-        time_span = st.number_input("Planning Time Span Horizon (Days)", min_value=10, max_value=5000, value=1000, step=50, help="The model maximizes throughput within this window.")
+        time_span = st.number_input("Planning Time Span Horizon (Days)", min_value=10, max_value=5000, value=1000, step=50)
     with col_cap2:
-        max_instances = st.number_input("Max Instances per Job Type to Evaluate", min_value=2, max_value=50, value=8, step=1, help="Upper variable bound for tracking scaling configurations.")
+        max_instances = st.number_input("Max Instances per Job Type to Evaluate", min_value=2, max_value=50, value=8, step=1)
 
 st.markdown("---")
 
@@ -199,7 +207,6 @@ def display_scheduling_results(results_df, total_makespan, penalty_msg=""):
 def display_capacity_results(results_df, horizon):
     st.success("✨ Strategic Capacity Assessment Complete!")
     
-    # 1. Output Summary Table
     st.subheader("📊 Step 5: Optimal Capacity Output Summary")
     results_df["Instance_Count"] = 1
     summary = results_df.groupby("Base_Job").agg(
@@ -209,7 +216,6 @@ def display_capacity_results(results_df, horizon):
     summary.rename(columns={"Base_Job": "Job Type"}, inplace=True)
     st.dataframe(summary, use_container_width=True, hide_index=True)
     
-    # 2. Machine Utilization Statistics
     st.subheader("🏭 Step 6: Asset Utilization Metrics")
     all_resources = results_df['Resource'].unique()
     metric_cols = st.columns(len(all_resources))
@@ -266,8 +272,14 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in base_tasks for r in t['resources']}
             makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Integer')
             
-            # Hybrid objective: Minimize makespan primarily, pull individuals left ASAP
-            prob += makespan * 1000 + pulp.lpSum([end_vars[t['id']] for t in base_tasks])
+            # --- STRATEGY BOUND OBJECTIVE SELECTION ---
+            if scheduling_strategy == "As Soon As Possible (ASAP)":
+                # Minimize overall batch duration and pull tasks left ASAP
+                prob += makespan * 1000 + pulp.lpSum([end_vars[t['id']] for t in base_tasks])
+            else:
+                # Just-In-Time (JIT): Minimize the gap between delivery (Deadline) and job finish
+                # This pushes operations as close to the deadline as safely allowed
+                prob += pulp.lpSum([ (int(deadline_dict.get(t['job'], 999)) - end_vars[t['id']]) for t in base_tasks ])
             
             for t in base_tasks:
                 prob += end_vars[t['id']] == start_vars[t['id']] + t['duration']
@@ -310,13 +322,18 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 st.error("❌ No feasible schedule found. Deadlines might be too tight.")
                 
         else: # Evolutionary Algorithm - Demand Mode
-            # Reuse the structural decode function built previously
-            def decode_demand(priorities, t_list, d_dict, c_df):
-                sorted_idx = np.argsort(priorities)
+            def decode_demand(priorities, t_list, d_dict, c_df, strategy):
+                # If strategy is JIT, we sort priorities backwards to naturally build backwards from deadlines
+                if strategy == "Just In Time / Close to Due Date":
+                    sorted_idx = np.argsort(priorities)[::-1] 
+                else:
+                    sorted_idx = np.argsort(priorities)
+                    
                 res_avail, res_last, task_ends, sched = {}, {}, {}, []
                 for t in t_list: 
                     for r in t['resources']: res_avail[r] = 0
                 penalty = 0
+                
                 for idx in sorted_idx:
                     t = t_list[idx]
                     p_ready = max([task_ends.get(f"{t['job']}_{p}", 0) for p in t['preceding']] + [0])
@@ -327,29 +344,33 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                         if ps < best_s: best_s, best_r = ps, r
                     end = best_s + t['duration']
                     res_avail[best_r], res_last[best_r], task_ends[t['id']] = end, t['id'], end
-                    if end > int(d_dict.get(t['job'], 999)): penalty += (end - int(d_dict.get(t['job'], 999))) * 100
-                    sched.append({
-                        "Job": t['job'], "Process": t['process'], "Resource": best_r, "Duration": t['duration'],
-                        "Start_Day": best_s, "End_Day": end,
-                        "Start": pd.to_datetime(start_date) + timedelta(days=best_s), "Finish": pd.to_datetime(start_date) + timedelta(days=end)
-                    })
+                    
+                    target_dl = int(d_dict.get(t['job'], 999))
+                    if end > target_dl: 
+                        penalty += (end - target_dl) * 1000 # Hard penalty for missing due dates
+                    elif strategy == "Just In Time / Close to Due Date":
+                        penalty += (target_dl - end) * 5 # Soft penalty for completing too early
+                        
                 return sched, max(task_ends.values()) if task_ends else 0, penalty
 
             class DemandGA(ElementwiseProblem):
-                def __init__(self, tl, dd, cf): super().__init__(n_var=len(tl), n_obj=1, xl=0, xu=1); self.tl, self.dd, self.cf = tl, dd, cf
-                def _evaluate(self, x, out, *args, **kwargs): _, ms, pen = decode_demand(x, self.tl, self.dd, self.cf); out["F"] = ms + pen
+                def __init__(self, tl, dd, cf, strat): 
+                    super().__init__(n_var=len(tl), n_obj=1, xl=0, xu=1)
+                    self.tl, self.dd, self.cf, self.strat = tl, dd, cf, strat
+                def _evaluate(self, x, out, *args, **kwargs): 
+                    _, ms, pen = decode_demand(x, self.tl, self.dd, self.cf, self.strat)
+                    out["F"] = ms + pen if self.strat == "As Soon As Possible (ASAP)" else pen
 
             with st.spinner("Evolving demand schedule..."):
-                res = minimize(DemandGA(base_tasks, deadline_dict, df_changeover), GA(pop_size=ga_pop_size), get_termination("n_gen", ga_generations), seed=1)
-                best_sched, best_ms, final_pen = decode_demand(res.X, base_tasks, deadline_dict, df_changeover)
-                msg = "⚠️ Deadlines unachievable within set bounds." if final_pen > 0 else ""
+                res = minimize(DemandGA(base_tasks, deadline_dict, df_changeover, scheduling_strategy), GA(pop_size=ga_pop_size), get_termination("n_gen", ga_generations), seed=1)
+                best_sched, best_ms, final_pen = decode_demand(res.X, base_tasks, deadline_dict, df_changeover, scheduling_strategy)
+                msg = "⚠️ Deadlines unachievable within set bounds." if final_pen > 10000 else ""
                 display_scheduling_results(pd.DataFrame(best_sched), best_ms, msg)
 
     # =========================================================================
-    # ANALYSIS MODE: MAXIMUM CAPACITY ASSESSMENT (NEW LOGIC)
+    # ANALYSIS MODE: MAXIMUM CAPACITY ASSESSMENT
     # =========================================================================
     else:
-        # Build expanded task list mimicking potential replicates
         expanded_tasks = []
         for k in range(1, max_instances + 1):
             for bt in base_tasks:
@@ -373,7 +394,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in expanded_tasks for r in t['resources']}
             active_vars = {(j, k): pulp.LpVariable(f"active_{j}_{k}", cat='Binary') for j in unique_jobs_list for k in range(1, max_instances + 1)}
             
-            # Objective: Maximize total loaded processing days on all machines
             prob += pulp.lpSum([t['duration'] * active_vars[t['job'], t['copy_num']] for t in expanded_tasks])
             
             for t in expanded_tasks:
@@ -385,7 +405,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                     pred_id = f"{t['job']}_Copy{t['copy_num']}_{pred}"
                     if pred_id in start_vars: prob += start_vars[t['id']] >= end_vars[pred_id]
             
-            # Symmetric Sequencing: Force copy k to be filled sequentially
             for j in unique_jobs_list:
                 for k in range(2, max_instances + 1):
                     prob += active_vars[j, k] <= active_vars[j, k-1]
@@ -421,7 +440,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 if results: display_capacity_results(pd.DataFrame(results), time_span)
                 else: st.warning("No jobs could fit into the planning time span.")
             else:
-                st.error("❌ Capacity estimation failed. Loosen structural parameters or increase run time.")
+                st.error("❌ Capacity estimation failed.")
 
         else: # Evolutionary Algorithm - Capacity Mode
             def decode_capacity(priorities, t_list, horizon, c_df):
@@ -429,7 +448,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 res_avail, res_last, task_ends, sched = {}, {}, {}, []
                 for t in t_list: 
                     for r in t['resources']: res_avail[r] = 0
-                
                 cancelled_copies = set()
                 total_duration = 0
                 
@@ -438,7 +456,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                     copy_key = (t['job'], t['copy_num'])
                     if copy_key in cancelled_copies: continue
                     
-                    # Ensure precedence constraint rules match replica flow
                     pred_ready, possible = 0, True
                     for pred in t['preceding']:
                         pred_id = f"{t['job']}_Copy{t['copy_num']}_{pred}"
