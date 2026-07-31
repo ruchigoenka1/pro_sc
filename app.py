@@ -14,6 +14,16 @@ from pymoo.termination import get_termination
 
 st.set_page_config(layout="wide", page_title="Advanced Job Scheduler")
 
+# =========================================================================
+# INITIALIZE SESSION STATE
+# =========================================================================
+if "results_df" not in st.session_state:
+    st.session_state.results_df = None
+    st.session_state.run_mode = None
+    st.session_state.makespan = None
+    st.session_state.horizon = None
+    st.session_state.penalty_msg = ""
+
 ## --------------------------------------------------------
 ## 1. TITLE & MODE SELECTION
 ## --------------------------------------------------------
@@ -30,7 +40,7 @@ analysis_mode = st.sidebar.selectbox(
     ("Demand Scheduling (Fixed Deadlines)", "Maximum Capacity Assessment (Fixed Time Span)")
 )
 
-# NEW: Strategy selection inside Demand Scheduling
+# Strategy selection inside Demand Scheduling
 scheduling_strategy = "As Soon As Possible (ASAP)"
 if analysis_mode == "Demand Scheduling (Fixed Deadlines)":
     scheduling_strategy = st.sidebar.radio(
@@ -188,7 +198,7 @@ with st.expander("📝 Edit Process-Level Changeover Matrix", expanded=False):
 st.markdown("---")
 
 ## --------------------------------------------------------
-## 6. OPTIMIZATION LOGIC & RESULTS COMPONENT
+## 6. DISPLAY FUNCTIONS
 ## --------------------------------------------------------
 
 def display_scheduling_results(results_df, total_makespan, penalty_msg=""):
@@ -225,10 +235,9 @@ def display_capacity_results(results_df, horizon):
     st.dataframe(summary, use_container_width=True, hide_index=True)
     
     st.subheader("🏭 Step 6: Asset Utilization Metrics")
-    # Filter out the reserved 'INV' keyword so it doesn't display as a machine
     all_resources = [res for res in results_df['Resource'].unique() if res != "INV"]
     
-    if all_resources: # Only render columns if there are actual physical resources
+    if all_resources:
         metric_cols = st.columns(len(all_resources))
         for idx, res in enumerate(sorted(all_resources)):
             res_data = results_df[results_df['Resource'] == res]
@@ -245,83 +254,49 @@ def display_capacity_results(results_df, horizon):
 def render_gantt_charts(df):
     st.subheader("📊 Interactive Sequence Gantt Charts")
     
-    # Helper function to get ordinal suffixes (1st, 2nd, 3rd, 4th...)
     def get_ordinal(n):
-        if 11 <= (n % 100) <= 13:
-            return str(n) + 'th'
+        if 11 <= (n % 100) <= 13: return str(n) + 'th'
         return str(n) + {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
     
-    # Create a custom column for the hover tooltip
     df["Project_Day"] = df["Start_Day"].apply(lambda x: f"{get_ordinal(x)} Day") + " to " + df["End_Day"].apply(lambda x: f"{get_ordinal(x)} Day")
     
-    # Job Timeline Chart (Aggregated)
     fig_job = px.timeline(
-        df, 
-        x_start="Start", 
-        x_end="Finish", 
-        y="Job", 
-        color="Resource", 
-        text="Process", 
-        title="Timeline Grouped by Production Batches", 
-        height=450,
-        hover_data={"Project_Day": True, "Start": True, "Finish": True} # Added hover data
+        df, x_start="Start", x_end="Finish", y="Job", color="Resource", text="Process", 
+        title="Timeline Grouped by Production Batches", height=450,
+        hover_data={"Project_Day": True, "Start": True, "Finish": True}
     )
     fig_job.update_yaxes(autorange="reversed")
     fig_job.update_traces(textposition='inside', insidetextanchor='middle')
     fig_job.update_traces(hovertemplate='<b>%{y}</b><br>Process: %{text}<br>Dates: %{base} to %{x}<br>Timeline: %{customdata[0]}<extra></extra>')
-    
     st.plotly_chart(fig_job, use_container_width=True)
     st.markdown("---")
     
-    # Resource Timeline Chart
     fig_res = px.timeline(
-        df, 
-        x_start="Start", 
-        x_end="Finish", 
-        y="Resource", 
-        color="Job", 
-        text="Process", 
-        title="Timeline Grouped by Resource Allocation", 
-        height=450,
-        hover_data={"Project_Day": True, "Start": True, "Finish": True} # Added hover data
+        df, x_start="Start", x_end="Finish", y="Resource", color="Job", text="Process", 
+        title="Timeline Grouped by Resource Allocation", height=450,
+        hover_data={"Project_Day": True, "Start": True, "Finish": True}
     )
     fig_res.update_yaxes(autorange="reversed")
     fig_res.update_traces(textposition='inside', insidetextanchor='middle')
     fig_res.update_traces(hovertemplate='<b>%{y}</b><br>Process: %{text}<br>Dates: %{base} to %{x}<br>Timeline: %{customdata[0]}<extra></extra>')
-    
     st.plotly_chart(fig_res, use_container_width=True)
-
     st.markdown("---")
     
-    # NEW: Individual Job Breakdown Chart
     st.subheader("🔎 Individual Job Breakdown")
     selected_job = st.selectbox("Select a specific job to view its detailed flow:", sorted(df['Job'].unique()))
     
     if selected_job:
         job_df = df[df['Job'] == selected_job]
-        
-        # Uses 'Process' for the Y-axis to separate parallel tasks
         fig_ind = px.timeline(
-            job_df, 
-            x_start="Start", 
-            x_end="Finish", 
-            y="Process", 
-            color="Resource",
-            text="Process",
+            job_df, x_start="Start", x_end="Finish", y="Process", color="Resource", text="Process",
             title=f"Detailed Flow: {selected_job}",
-            height=max(300, 100 + (len(job_df['Process'].unique()) * 40)), # Dynamic height based on processes
+            height=max(300, 100 + (len(job_df['Process'].unique()) * 40)),
             hover_data={"Project_Day": True, "Start": True, "Finish": True},
             color_discrete_sequence=['#1E3A8A', '#2563EB', '#3B82F6', '#60A5FA', '#93C5FD', '#BFDBFE']
         )
         fig_ind.update_yaxes(autorange="reversed")
         
-        # Applying a clean, minimalist styling layout
-        fig_ind.update_layout(
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            xaxis=dict(showgrid=True, gridcolor='#E5E7EB'),
-            yaxis=dict(showgrid=True, gridcolor='#E5E7EB')
-        )
+        # White background removed here so it matches native Streamlit dark/light theme
         fig_ind.update_traces(
             textposition='inside', 
             insidetextanchor='middle',
@@ -330,16 +305,15 @@ def render_gantt_charts(df):
         st.plotly_chart(fig_ind, use_container_width=True)
 
 
-# Parse Baseline Data
+## --------------------------------------------------------
+## 7. EXECUTION BLOCK
+## --------------------------------------------------------
 base_tasks = []
 for idx, row in valid_df.iterrows():
     base_tasks.append({
-        'id': f"{row['Job']}_{row['Process']}",
-        'job': row['Job'],
-        'process': row['Process'],
+        'id': f"{row['Job']}_{row['Process']}", 'job': row['Job'], 'process': row['Process'],
         'resources': [r.strip() for r in str(row['Eligible_Resources']).split(',') if r.strip()],
-        'duration': int(row['Duration']),
-        'preceding': [p.strip() for p in str(row['Preceding_Process']).split(',') if p.strip()]
+        'duration': int(row['Duration']), 'preceding': [p.strip() for p in str(row['Preceding_Process']).split(',') if p.strip()]
     })
 
 if st.button(f"🚀 Run {solver_choice}", type="primary"):
@@ -347,9 +321,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
         st.error("Please ensure you have inputted process recipes in Step 1.")
         st.stop()
 
-    # =========================================================================
-    # ANALYSIS MODE: DEMAND SCHEDULING (FIXED OBJECTS)
-    # =========================================================================
     if analysis_mode == "Demand Scheduling (Fixed Deadlines)":
         if solver_choice == "Optimizer":
             prob = pulp.LpProblem("Demand_Scheduling", pulp.LpMinimize)
@@ -358,13 +329,9 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
             assign_vars = {(t['id'], r): pulp.LpVariable(f"assign_{t['id']}_{r}", cat='Binary') for t in base_tasks for r in t['resources']}
             makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Integer')
             
-            # --- STRATEGY BOUND OBJECTIVE SELECTION ---
             if scheduling_strategy == "As Soon As Possible (ASAP)":
-                # Minimize overall batch duration and pull tasks left ASAP
                 prob += makespan * 1000 + pulp.lpSum([end_vars[t['id']] for t in base_tasks])
             else:
-                # Just-In-Time (JIT): Minimize the gap between delivery (Deadline) and job finish
-                # This pushes operations as close to the deadline as safely allowed
                 prob += pulp.lpSum([ (int(deadline_dict.get(t['job'], 999)) - end_vars[t['id']]) for t in base_tasks ])
             
             for t in base_tasks:
@@ -372,7 +339,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 prob += makespan >= end_vars[t['id']]
                 prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
                 
-                # Enforce Earliest Start Day constraint
                 earliest_start = int(start_day_dict.get(t['job'], 0))
                 prob += start_vars[t['id']] >= earliest_start
                 
@@ -385,7 +351,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 for j in range(i + 1, len(base_tasks)):
                     t1, t2 = base_tasks[i], base_tasks[j]
                     common_res = set(t1['resources']).intersection(set(t2['resources']))
-                    common_res.discard("INV") # Remove INV from bottleneck calculations
+                    common_res.discard("INV") 
                     if common_res:
                         y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
                         for r in common_res:
@@ -409,17 +375,18 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                         "Start_Day": s_val, "End_Day": e_val,
                         "Start": pd.to_datetime(start_date) + timedelta(days=s_val), "Finish": pd.to_datetime(start_date) + timedelta(days=e_val)
                     })
-                display_scheduling_results(pd.DataFrame(results), int(makespan.varValue))
+                # Save to session state instead of displaying immediately
+                st.session_state.results_df = pd.DataFrame(results)
+                st.session_state.makespan = int(makespan.varValue)
+                st.session_state.penalty_msg = ""
+                st.session_state.run_mode = "Demand"
             else:
+                st.session_state.results_df = None
                 st.error("❌ No feasible schedule found. Deadlines might be too tight.")
                 
-        else: # Evolutionary Algorithm - Demand Mode
+        else: # Evolutionary Algorithm
             def decode_demand(priorities, t_list, s_dict, d_dict, c_df, strategy):
-                if strategy == "Just In Time / Close to Due Date":
-                    sorted_idx = np.argsort(priorities)[::-1] 
-                else:
-                    sorted_idx = np.argsort(priorities)
-                    
+                sorted_idx = np.argsort(priorities)[::-1] if strategy == "Just In Time / Close to Due Date" else np.argsort(priorities)
                 res_avail, res_last, task_ends, sched = {}, {}, {}, []
                 for t in t_list: 
                     for r in t['resources']: res_avail[r] = 0
@@ -433,7 +400,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                     best_s, best_r = float('inf'), None
                     for r in t['resources']:
                         if r == "INV":
-                            # INV has infinite capacity; ignores previous resource availability and changeovers
                             ps = max(p_ready, job_earliest_start)
                         else:
                             c_time = int(c_df.loc[res_last[r], t['id']]) if r in res_last and res_last[r] in c_df.index else 0
@@ -442,11 +408,10 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                         
                     end = best_s + t['duration']
                     
-                    if best_r != "INV": # Do not block future tasks waiting on INV
+                    if best_r != "INV":
                         res_avail[best_r], res_last[best_r] = end, t['id']
                     
                     task_ends[t['id']] = end
-                    
                     sched.append({
                         "Job": t['job'], "Process": t['process'], "Resource": best_r, "Duration": t['duration'],
                         "Start_Day": best_s, "End_Day": end,
@@ -474,25 +439,20 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 best_sched, best_ms, final_pen = decode_demand(res.X, base_tasks, start_day_dict, deadline_dict, df_changeover, scheduling_strategy)
                 
                 msg = "⚠️ Deadlines unachievable within set bounds." if final_pen > 10000 else ""
-                display_scheduling_results(pd.DataFrame(best_sched), best_ms, msg)
+                
+                st.session_state.results_df = pd.DataFrame(best_sched)
+                st.session_state.makespan = best_ms
+                st.session_state.penalty_msg = msg
+                st.session_state.run_mode = "Demand"
 
-    # =========================================================================
-    # ANALYSIS MODE: MAXIMUM CAPACITY ASSESSMENT
-    # =========================================================================
-    else:
+    else: # Capacity Mode
         expanded_tasks = []
         for k in range(1, max_instances + 1):
             for bt in base_tasks:
                 expanded_tasks.append({
-                    'id': f"{bt['job']}_Copy{k}_{bt['process']}",
-                    'base_id': bt['id'],
-                    'job': bt['job'],
-                    'copy_num': k,
-                    'job_display': f"{bt['job']} (Unit {k})",
-                    'process': bt['process'],
-                    'resources': bt['resources'],
-                    'duration': bt['duration'],
-                    'preceding': bt['preceding']
+                    'id': f"{bt['job']}_Copy{k}_{bt['process']}", 'base_id': bt['id'], 'job': bt['job'],
+                    'copy_num': k, 'job_display': f"{bt['job']} (Unit {k})", 'process': bt['process'],
+                    'resources': bt['resources'], 'duration': bt['duration'], 'preceding': bt['preceding']
                 })
 
         if solver_choice == "Optimizer":
@@ -523,7 +483,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 for j in range(i + 1, len(expanded_tasks)):
                     t1, t2 = expanded_tasks[i], expanded_tasks[j]
                     common_res = set(t1['resources']).intersection(set(t2['resources']))
-                    common_res.discard("INV") # Remove INV from bottleneck calculations
+                    common_res.discard("INV")
                     if common_res:
                         y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
                         for r in common_res:
@@ -547,12 +507,18 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                         "Start_Day": s_val, "End_Day": e_val,
                         "Start": pd.to_datetime(start_date) + timedelta(days=s_val), "Finish": pd.to_datetime(start_date) + timedelta(days=e_val)
                     })
-                if results: display_capacity_results(pd.DataFrame(results), time_span)
-                else: st.warning("No jobs could fit into the planning time span.")
+                if results: 
+                    st.session_state.results_df = pd.DataFrame(results)
+                    st.session_state.horizon = time_span
+                    st.session_state.run_mode = "Capacity"
+                else: 
+                    st.session_state.results_df = None
+                    st.warning("No jobs could fit into the planning time span.")
             else:
+                st.session_state.results_df = None
                 st.error("❌ Capacity estimation failed.")
 
-        else: # Evolutionary Algorithm - Capacity Mode
+        else: # Capacity GA
             def decode_capacity(priorities, t_list, horizon, c_df):
                 sorted_idx = np.argsort(priorities)
                 res_avail, res_last, task_ends, sched = {}, {}, {}, []
@@ -588,7 +554,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                         
                     end = best_s + t['duration']
                     
-                    if best_r != "INV": # Do not block future tasks waiting on INV
+                    if best_r != "INV":
                         res_avail[best_r], res_last[best_r] = end, t['base_id']
                         
                     task_ends[t['id']] = end
@@ -603,10 +569,24 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
 
             class CapacityGA(ElementwiseProblem):
                 def __init__(self, tl, hz, cf): super().__init__(n_var=len(tl), n_obj=1, xl=0, xu=1); self.tl, self.hz, self.cf = tl, hz, cf
-                def _evaluate(self, x, out, *args, **kwargs): _, tot_dur = decode_capacity(x, self.tl, self.hz, self.cf); out["F"] = -tot_dur # Maximize
+                def _evaluate(self, x, out, *args, **kwargs): _, tot_dur = decode_capacity(x, self.tl, self.hz, self.cf); out["F"] = -tot_dur 
 
             with st.spinner("Executing evolutionary capacity packing iteration..."):
                 res = minimize(CapacityGA(expanded_tasks, time_span, df_changeover), GA(pop_size=ga_pop_size), get_termination("n_gen", ga_generations), seed=1)
                 best_sched, _ = decode_capacity(res.X, expanded_tasks, time_span, df_changeover)
-                if best_sched: display_capacity_results(pd.DataFrame(best_sched), time_span)
-                else: st.warning("No units managed to pack within the requested horizon limit.")
+                if best_sched: 
+                    st.session_state.results_df = pd.DataFrame(best_sched)
+                    st.session_state.horizon = time_span
+                    st.session_state.run_mode = "Capacity"
+                else: 
+                    st.session_state.results_df = None
+                    st.warning("No units managed to pack within the requested horizon limit.")
+
+# =========================================================================
+# PERSISTENT DISPLAY BLOCK
+# =========================================================================
+if st.session_state.results_df is not None:
+    if st.session_state.run_mode == "Demand":
+        display_scheduling_results(st.session_state.results_df, st.session_state.makespan, st.session_state.penalty_msg)
+    elif st.session_state.run_mode == "Capacity":
+        display_capacity_results(st.session_state.results_df, st.session_state.horizon)
