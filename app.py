@@ -225,15 +225,17 @@ def display_capacity_results(results_df, horizon):
     st.dataframe(summary, use_container_width=True, hide_index=True)
     
     st.subheader("🏭 Step 6: Asset Utilization Metrics")
-    all_resources = results_df['Resource'].unique()
-    metric_cols = st.columns(len(all_resources))
+    # Filter out the reserved 'INV' keyword so it doesn't display as a machine
+    all_resources = [res for res in results_df['Resource'].unique() if res != "INV"]
     
-    for idx, res in enumerate(sorted(all_resources)):
-        res_data = results_df[results_df['Resource'] == res]
-        total_active_time = res_data['Duration'].sum()
-        utilization_pct = min(100.0, (total_active_time / horizon) * 100)
-        with metric_cols[idx]:
-            st.metric(label=f"Machine {res} Utilization", value=f"{utilization_pct:.1f}%", delta=f"{total_active_time} active days")
+    if all_resources: # Only render columns if there are actual physical resources
+        metric_cols = st.columns(len(all_resources))
+        for idx, res in enumerate(sorted(all_resources)):
+            res_data = results_df[results_df['Resource'] == res]
+            total_active_time = res_data['Duration'].sum()
+            utilization_pct = min(100.0, (total_active_time / horizon) * 100)
+            with metric_cols[idx]:
+                st.metric(label=f"Machine {res} Utilization", value=f"{utilization_pct:.1f}%", delta=f"{total_active_time} active days")
             
     with st.expander("🔍 View Volumetric Production Sequence Logs"):
         st.dataframe(results_df[["Job", "Process", "Resource", "Start_Day", "End_Day"]], use_container_width=True, hide_index=True)
@@ -252,7 +254,7 @@ def render_gantt_charts(df):
     # Create a custom column for the hover tooltip
     df["Project_Day"] = df["Start_Day"].apply(lambda x: f"{get_ordinal(x)} Day") + " to " + df["End_Day"].apply(lambda x: f"{get_ordinal(x)} Day")
     
-    # Job Timeline Chart
+    # Job Timeline Chart (Aggregated)
     fig_job = px.timeline(
         df, 
         x_start="Start", 
@@ -266,7 +268,6 @@ def render_gantt_charts(df):
     )
     fig_job.update_yaxes(autorange="reversed")
     fig_job.update_traces(textposition='inside', insidetextanchor='middle')
-    # Update hover template to format how it looks when hovering
     fig_job.update_traces(hovertemplate='<b>%{y}</b><br>Process: %{text}<br>Dates: %{base} to %{x}<br>Timeline: %{customdata[0]}<extra></extra>')
     
     st.plotly_chart(fig_job, use_container_width=True)
@@ -289,6 +290,45 @@ def render_gantt_charts(df):
     fig_res.update_traces(hovertemplate='<b>%{y}</b><br>Process: %{text}<br>Dates: %{base} to %{x}<br>Timeline: %{customdata[0]}<extra></extra>')
     
     st.plotly_chart(fig_res, use_container_width=True)
+
+    st.markdown("---")
+    
+    # NEW: Individual Job Breakdown Chart
+    st.subheader("🔎 Individual Job Breakdown")
+    selected_job = st.selectbox("Select a specific job to view its detailed flow:", sorted(df['Job'].unique()))
+    
+    if selected_job:
+        job_df = df[df['Job'] == selected_job]
+        
+        # Uses 'Process' for the Y-axis to separate parallel tasks
+        fig_ind = px.timeline(
+            job_df, 
+            x_start="Start", 
+            x_end="Finish", 
+            y="Process", 
+            color="Resource",
+            text="Process",
+            title=f"Detailed Flow: {selected_job}",
+            height=max(300, 100 + (len(job_df['Process'].unique()) * 40)), # Dynamic height based on processes
+            hover_data={"Project_Day": True, "Start": True, "Finish": True},
+            color_discrete_sequence=['#1E3A8A', '#2563EB', '#3B82F6', '#60A5FA', '#93C5FD', '#BFDBFE']
+        )
+        fig_ind.update_yaxes(autorange="reversed")
+        
+        # Applying a clean, minimalist styling layout
+        fig_ind.update_layout(
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            xaxis=dict(showgrid=True, gridcolor='#E5E7EB'),
+            yaxis=dict(showgrid=True, gridcolor='#E5E7EB')
+        )
+        fig_ind.update_traces(
+            textposition='inside', 
+            insidetextanchor='middle',
+            hovertemplate='<b>Process: %{y}</b><br>Resource: %{customdata[1]}<br>Dates: %{base} to %{x}<br>Timeline: %{customdata[0]}<extra></extra>'
+        )
+        st.plotly_chart(fig_ind, use_container_width=True)
+
 
 # Parse Baseline Data
 base_tasks = []
@@ -332,7 +372,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 prob += makespan >= end_vars[t['id']]
                 prob += pulp.lpSum([assign_vars[(t['id'], r)] for r in t['resources']]) == 1
                 
-                # NEW: Enforce Earliest Start Day constraint
+                # Enforce Earliest Start Day constraint
                 earliest_start = int(start_day_dict.get(t['job'], 0))
                 prob += start_vars[t['id']] >= earliest_start
                 
@@ -345,6 +385,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 for j in range(i + 1, len(base_tasks)):
                     t1, t2 = base_tasks[i], base_tasks[j]
                     common_res = set(t1['resources']).intersection(set(t2['resources']))
+                    common_res.discard("INV") # Remove INV from bottleneck calculations
                     if common_res:
                         y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
                         for r in common_res:
@@ -387,17 +428,30 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 for idx in sorted_idx:
                     t = t_list[idx]
                     p_ready = max([task_ends.get(f"{t['job']}_{p}", 0) for p in t['preceding']] + [0])
-                    job_earliest_start = int(s_dict.get(t['job'], 0)) # Retrieve earliest start
+                    job_earliest_start = int(s_dict.get(t['job'], 0)) 
                     
                     best_s, best_r = float('inf'), None
                     for r in t['resources']:
-                        c_time = int(c_df.loc[res_last[r], t['id']]) if r in res_last and res_last[r] in c_df.index else 0
-                        # Ensure task cannot start before predecessors, resource availability, OR the job's earliest start day
-                        ps = max(p_ready, res_avail[r] + c_time, job_earliest_start) 
+                        if r == "INV":
+                            # INV has infinite capacity; ignores previous resource availability and changeovers
+                            ps = max(p_ready, job_earliest_start)
+                        else:
+                            c_time = int(c_df.loc[res_last[r], t['id']]) if r in res_last and res_last[r] in c_df.index else 0
+                            ps = max(p_ready, res_avail[r] + c_time, job_earliest_start) 
                         if ps < best_s: best_s, best_r = ps, r
                         
                     end = best_s + t['duration']
-                    res_avail[best_r], res_last[best_r], task_ends[t['id']] = end, t['id'], end
+                    
+                    if best_r != "INV": # Do not block future tasks waiting on INV
+                        res_avail[best_r], res_last[best_r] = end, t['id']
+                    
+                    task_ends[t['id']] = end
+                    
+                    sched.append({
+                        "Job": t['job'], "Process": t['process'], "Resource": best_r, "Duration": t['duration'],
+                        "Start_Day": best_s, "End_Day": end,
+                        "Start": pd.to_datetime(start_date) + timedelta(days=best_s), "Finish": pd.to_datetime(start_date) + timedelta(days=end)
+                    })
                     
                     target_dl = int(d_dict.get(t['job'], 999))
                     if end > target_dl: 
@@ -416,7 +470,6 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                     out["F"] = ms + pen if self.strat == "As Soon As Possible (ASAP)" else pen
 
             with st.spinner("Evolving demand schedule..."):
-                # Pass start_day_dict into the minimization and decoding functions
                 res = minimize(DemandGA(base_tasks, start_day_dict, deadline_dict, df_changeover, scheduling_strategy), GA(pop_size=ga_pop_size), get_termination("n_gen", ga_generations), seed=1)
                 best_sched, best_ms, final_pen = decode_demand(res.X, base_tasks, start_day_dict, deadline_dict, df_changeover, scheduling_strategy)
                 
@@ -470,6 +523,7 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                 for j in range(i + 1, len(expanded_tasks)):
                     t1, t2 = expanded_tasks[i], expanded_tasks[j]
                     common_res = set(t1['resources']).intersection(set(t2['resources']))
+                    common_res.discard("INV") # Remove INV from bottleneck calculations
                     if common_res:
                         y = pulp.LpVariable(f"seq_{t1['id']}_{t2['id']}", cat='Binary')
                         for r in common_res:
@@ -522,15 +576,22 @@ if st.button(f"🚀 Run {solver_choice}", type="primary"):
                     
                     best_s, best_r = float('inf'), None
                     for r in t['resources']:
-                        c_time = int(c_df.loc[res_last[r], t['base_id']]) if r in res_last and res_last[r] in c_df.index else 0
-                        ps = max(pred_ready, res_avail[r] + c_time)
+                        if r == "INV":
+                            ps = pred_ready
+                        else:
+                            c_time = int(c_df.loc[res_last[r], t['base_id']]) if r in res_last and res_last[r] in c_df.index else 0
+                            ps = max(pred_ready, res_avail[r] + c_time)
                         if ps < best_s: best_s, best_r = ps, r
                         
                     if best_s + t['duration'] > horizon:
                         cancelled_copies.add(copy_key); continue
                         
                     end = best_s + t['duration']
-                    res_avail[best_r], res_last[best_r], task_ends[t['id']] = end, t['base_id'], end
+                    
+                    if best_r != "INV": # Do not block future tasks waiting on INV
+                        res_avail[best_r], res_last[best_r] = end, t['base_id']
+                        
+                    task_ends[t['id']] = end
                     total_duration += t['duration']
                     
                     sched.append({
